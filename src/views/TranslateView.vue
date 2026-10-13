@@ -23,6 +23,13 @@ const elapsed = ref(0)
 const showAdvanced = ref(false)
 const currentJob = ref('')
 const failed = ref('')
+const inputEl = ref<HTMLTextAreaElement | null>(null)
+const autoTranslate = ref(true)
+/** 最近一次完成翻译的原文，用来识别「只是改了内容」还是「原样重跑」。 */
+let lastTranslated = ''
+let debounceTimer: number | undefined
+/** 翻译进行中触发的自动翻译不丢弃，等这一轮结束补跑。 */
+let autoPending = false
 
 // ---------- derived ----------
 const modeOptions = computed(() => meta.value.modes.map(([k, label]) => ({ value: k as Mode, label })))
@@ -131,6 +138,7 @@ async function run() {
           result.value = e.payload.text
           elapsed.value = e.payload.ms
           usedTerms.value = e.payload.used_terms ?? []
+          lastTranslated = source.value
           busy.value = false
         }
       )
@@ -159,7 +167,49 @@ async function run() {
   }
 }
 
-onUnmounted(() => unlisten.forEach((f) => f()))
+onUnmounted(() => {
+  unlisten.forEach((f) => f())
+  window.clearTimeout(debounceTimer)
+})
+
+function clearAll() {
+  source.value = ''
+  result.value = ''
+  failed.value = ''
+  usedTerms.value = []
+  elapsed.value = 0
+  lastTranslated = ''
+  autoPending = false
+  window.clearTimeout(debounceTimer)
+  inputEl.value?.focus()
+}
+
+// 停止输入 1 秒后自动翻译；已翻译过的原文再次触发时跳过（留给 Ctrl+Enter）
+function scheduleAuto() {
+  window.clearTimeout(debounceTimer)
+  if (!source.value.trim()) return
+  debounceTimer = window.setTimeout(() => {
+    // 取当前原文而非入队时的快照：等待期间用户可能又改了几个字。
+    const text = source.value
+    if (text.trim() === lastTranslated.trim()) return
+    if (busy.value) {
+      autoPending = true
+      return
+    }
+    run()
+  }, 1000)
+}
+
+watch(source, () => {
+  if (autoTranslate.value) scheduleAuto()
+})
+
+// 补跑上一轮结束前到达的自动翻译，否则长文本翻译期间的输入会丢失。
+watch(busy, (isBusy) => {
+  if (isBusy || !autoPending) return
+  autoPending = false
+  scheduleAuto()
+})
 
 // ---------- misc ----------
 // Hy-MT2 自动识别源语言，交换只需对调文本与目标语言
@@ -199,17 +249,33 @@ async function showPrompt() {
 
     <!-- 双栏 -->
     <div class="panes">
-      <section class="pane">
+      <section class="pane pane--src">
+        <button
+          v-if="source"
+          class="clear"
+          title="清空原文与译文 (Esc)"
+          @click="clearAll"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M18 6L6 18M6 6l12 12" />
+          </svg>
+        </button>
         <textarea
+          ref="inputEl"
           v-model="source"
           class="pane__input"
           placeholder="输入或粘贴文本…"
           spellcheck="false"
           @keydown.ctrl.enter="run"
+          @keydown.esc="clearAll"
         />
         <div class="pane__bar">
           <span class="count">{{ source.length }} 字</span>
           <span class="grow" />
+          <label class="tbtn switch" title="停止输入 1 秒后自动翻译">
+            <input v-model="autoTranslate" type="checkbox" />
+            自动翻译
+          </label>
           <button class="tbtn" @click="showAdvanced = !showAdvanced">
             高级
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
@@ -556,6 +622,44 @@ async function showPrompt() {
 .swap:hover {
   transform: translate(-50%, -50%) scale(1.06);
   box-shadow: 0 4px 12px rgba(60, 64, 67, 0.24);
+}
+
+/* 清空按钮：贴在输入区右上角 */
+.clear {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  z-index: 5;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  color: var(--c-text-tertiary);
+  background: transparent;
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+.clear:hover {
+  color: var(--c-text);
+  background: rgba(60, 64, 67, 0.12);
+}
+
+.pane--src {
+  position: relative;
+}
+
+/* 自动翻译开关 */
+.switch {
+  cursor: pointer;
+  user-select: none;
+}
+
+.switch input {
+  margin: 0;
+  accent-color: var(--c-primary);
 }
 
 /* 流式光标 */
