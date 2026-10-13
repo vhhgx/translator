@@ -36,3 +36,4 @@ Thumbs.db
 # release artifacts
 *.exe
 scripts/app-*.png
+scripts/*.png

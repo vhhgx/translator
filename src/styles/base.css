@@ -350,3 +350,111 @@ textarea.input {
   font-size: 13px;
   line-height: 1.6;
 }
+
+/* ---------- 语言标签（Google 风格） ---------- */
+
+.lang-tabs {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  height: 42px;
+  padding: 0 var(--sp-1);
+  border-bottom: 1px solid var(--c-border-soft);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.lang-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.lang-tab {
+  position: relative;
+  flex-shrink: 0;
+  padding: 10px 2px;
+  font-family: inherit;
+  font-size: 14px;
+  color: var(--c-text-secondary);
+  background: none;
+  border: none;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 0.15s;
+}
+
+.lang-tab:hover {
+  color: var(--c-text);
+}
+
+.lang-tab--active {
+  color: var(--c-primary);
+  font-weight: 500;
+}
+
+.lang-tab--active::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 3px;
+  background: var(--c-primary);
+  border-radius: 3px 3px 0 0;
+}
+
+/* ---------- 翻译卡片 ---------- */
+
+.t-card {
+  display: flex;
+  flex-direction: column;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-lg);
+  overflow: hidden;
+  transition: border-color 0.15s;
+}
+
+.t-card:focus-within {
+  border-color: var(--c-border);
+}
+
+.t-card--output {
+  background: var(--c-surface-alt);
+  border-color: var(--c-border-soft);
+}
+
+.t-card__body {
+  flex: 1;
+  min-height: 0;
+  padding: var(--sp-4);
+  overflow-y: auto;
+}
+
+.t-card__foot {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-top: 1px solid transparent;
+}
+
+.t-card--output .t-card__foot {
+  border-top-color: var(--c-border-soft);
+}
+
+/* 流式光标 */
+.stream-caret {
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: var(--c-primary);
+  animation: blink 1s step-end infinite;
+}
+
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}

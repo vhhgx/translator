@@ -8,12 +8,14 @@ Rust 只负责界面宿主与 IO —— 配置、凭据、HTTP 调用、文档�
 
 | 模块 | 说明 |
 |---|---|
-| **翻译** | 6 种模式：基础 / 术语约束 / 风格控制 / 背景语境 / 分隔符保留 / 结构化数据 |
+| **翻译** | 6 种模式：基础 / 术语约束 / 风格控制 / 背景语境 / 分隔符保留 / 结构化数据。**流式输出**，逐 token 渲染 |
 | **后端切换** | 顶部下拉实时切换；可配置多个 OpenAI 兼容端点（baseurl + 模型名 + API key） |
 | **术语库** | 多词库增删改查、JSON 导入导出、按语言对组织、可只取原文命中的词 |
 | **历史** | SQLite 本地存储，支持搜索、复用 |
 | **批量** | JSONL 读入，并发翻译，输出追加 `translation` 字段，断点续跑 |
 | **文档** | `.txt` / `.md`，自动识别 GBK / GB18030 / Big5 / UTF-16；Markdown 保留标题、列表、表格、代码块 |
+
+界面参考 Google 翻译：语言 Tab 常驻在两个卡片上方，中间是交换按钮，底部是字数统计与操作按钮；六种翻译模式收在「高级」面板里。全部手写 CSS，设计 token 用 CSS 变量统一。
 
 ## 快速开始
 
@@ -57,6 +59,27 @@ cd src-tauri && cargo test
 ```
 
 `docs/upstream/` 是从 skillhub 下载的官方原始文件，作为比对基准留存。若提示词与官方不一致，测试会失败——这是刻意的。
+
+## 流式实现
+
+翻译走 SSE（`stream: true`），Rust 解析后通过 Tauri 事件推给前端逐 token 渲染：
+
+```
+llama-server ──SSE──► client::translate_stream ──emit──► hymt2:delta ──► Vue 增量追加
+                                              └──emit──► hymt2:done  ──► 收尾 + 计时 + 存历史
+                                              └──emit──► hymt2:error ──► 面板内显示
+```
+
+> **注意**：Tauri v2 的事件需要显式授权，否则前端 `listen()` 会被 ACL 拒绝且不报错，表现为「一直转圈」。相关权限声明在 `src-tauri/capabilities/default.json`。
+
+测试：
+
+```bash
+cd src-tauri && cargo test            # 含流式一致性测试
+HYMT_URL=http://127.0.0.1:8080 cargo test --test stream -- --nocapture
+```
+
+模型服务未启动时端到端测试会自动跳过。
 
 ## API Key 存储
 

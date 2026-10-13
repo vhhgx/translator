@@ -155,6 +155,103 @@ pub fn compose(req: &TranslateRequest) -> AppResult<(String, String, Vec<String>
     Ok((built, resolved, used))
 }
 
+/// Streaming counterpart of [`translate`].
+///
+/// Calls `stream: true` and parses the SSE feed, returning an async iterator of
+/// text deltas. Kept separate from `translate` so the non-streaming path (batch,
+/// document) stays a single simple request/response.
+pub async fn translate_stream(
+    backend: &Backend,
+    api_key: Option<&str>,
+    temperature: f32,
+    timeout_secs: u64,
+    req: &TranslateRequest,
+    mut on_delta: impl FnMut(&str),
+) -> AppResult<String> {
+    let (prompt_text, _resolved, _used) = compose(req)?;
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(timeout_secs))
+        .build()
+        .map_err(|e| AppError::Http(e.to_string()))?;
+
+    let body = serde_json::json!({
+        "model": backend.model,
+        "messages": [{ "role": "user", "content": prompt_text }],
+        "temperature": temperature,
+        "max_tokens": 8192,
+        "stream": true,
+    });
+
+    let mut builder = client.post(endpoint(&backend.base_url));
+    if let Some(key) = api_key.filter(|k| !k.is_empty()) {
+        builder = builder.bearer_auth(key);
+    }
+
+    let mut resp = builder
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| AppError::Http(format!("{e}\n\n请确认该后端地址可达（本地服务是否已启动？）")))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let raw = resp.text().await.unwrap_or_default();
+        return Err(AppError::Http(format!(
+            "HTTP {status}: {}",
+            &raw[..raw.len().min(400)]
+        )));
+    }
+
+    let mut full = String::new();
+    let mut buf = String::new();
+
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| AppError::Http(format!("读取流失败: {e}")))?
+    {
+        buf.push_str(&String::from_utf8_lossy(&chunk));
+
+        // SSE frames are separated by blank lines; keep the remainder buffered.
+        while let Some(pos) = buf.find('\n') {
+            let line: String = buf.drain(..=pos).collect();
+            let line = line.trim();
+            if line.is_empty() || line.starts_with(':') || line.starts_with("event:") {
+                continue;
+            }
+            let Some(payload) = line.strip_prefix("data:") else {
+                continue;
+            };
+            let payload = payload.trim();
+            if payload == "[DONE]" {
+                continue;
+            }
+            let Ok(json) = serde_json::from_str::<serde_json::Value>(payload) else {
+                continue;
+            };
+            if let Some(delta) = json
+                .get("choices")
+                .and_then(|c| c.get(0))
+                .and_then(|c| c.get("delta"))
+                .and_then(|d| d.get("content"))
+                .and_then(|v| v.as_str())
+            {
+                if !delta.is_empty() {
+                    full.push_str(delta);
+                    on_delta(delta);
+                }
+            }
+        }
+    }
+
+    if full.trim().is_empty() {
+        return Err(AppError::Translate("模型返回了空内容".into()));
+    }
+    Ok(full)
+}
+
+/// Non-streaming translation: one request, one response.
 pub async fn translate(
     backend: &Backend,
     api_key: Option<&str>,

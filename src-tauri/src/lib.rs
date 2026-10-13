@@ -26,8 +26,11 @@ use prompt::Mode;
 pub struct AppState {
     settings: Mutex<Settings>,
     glossary: Mutex<Glossary>,
-    history: Mutex<Option<History>>,
 }
+
+/// History lives in a global because streaming jobs run detached from the
+/// command's `State`, which cannot be moved into a `'static` task.
+static HISTORY: Mutex<Option<History>> = Mutex::new(None);
 
 type CmdResult<T> = Result<T, AppError>;
 
@@ -153,9 +156,8 @@ async fn translate(
     let resp = client::translate(&backend, key.as_deref(), temperature, timeout, &req).await?;
 
     if save_history.unwrap_or(true) {
-        let hist = state.history.lock().unwrap();
-        if let Some(h) = hist.as_ref() {
-            let _ = h.add(&history::HistoryItem {
+        let _ = with_history(|h| {
+            h.add(&history::HistoryItem {
                 id: uuid::Uuid::new_v4().to_string(),
                 created_at: now_millis(),
                 source: req.text.clone(),
@@ -164,10 +166,90 @@ async fn translate(
                 target_lang: resp.target_lang.clone(),
                 backend_id: backend.id.clone(),
                 mode: mode_key(req.mode).to_string(),
-            });
-        }
+            })
+        });
     }
     Ok(resp)
+}
+
+/// Streaming translation.
+///
+/// Returns immediately; tokens are pushed to the webview as events:
+///   - `hymt2:delta`  { job_id, text }   one or more times
+///   - `hymt2:done`   { job_id, text, target_lang, ms, used_terms }
+///   - `hymt2:error`  { job_id, message }
+#[tauri::command]
+async fn translate_stream(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    req: TranslateRequest,
+    job_id: String,
+) -> CmdResult<()> {
+    let (backend, temperature, timeout) = {
+        let s = state.settings.lock().unwrap();
+        let b = s
+            .active()
+            .cloned()
+            .ok_or_else(|| AppError::Io("尚未配置任何后端".into()))?;
+        (b, s.temperature, s.timeout_secs)
+    };
+    let key = config::load_secret(&backend.id);
+    let started = std::time::Instant::now();
+
+    tauri::async_runtime::spawn(async move {
+        use tauri::Emitter;
+
+        let app2 = app.clone();
+        let jid = job_id.clone();
+        let result = client::translate_stream(&backend, key.as_deref(), temperature, timeout, &req, |delta| {
+            let _ = app2.emit(
+                "hymt2:delta",
+                serde_json::json!({ "job_id": jid, "text": delta }),
+            );
+        })
+        .await;
+
+        match result {
+            Ok(text) => {
+                let (target_lang, used_terms) = match client::compose(&req) {
+                    Ok((_, lang, used)) => (lang, used),
+                    Err(_) => (String::new(), Vec::new()),
+                };
+                let _ = app.emit(
+                    "hymt2:done",
+                    serde_json::json!({
+                        "job_id": job_id,
+                        "text": text,
+                        "target_lang": target_lang,
+                        "used_terms": used_terms,
+                        "ms": started.elapsed().as_millis(),
+                    }),
+                );
+                // Persist to history once the stream finishes.
+                let hist = HISTORY.lock().unwrap();
+                if let Some(h) = hist.as_ref() {
+                    let _ = h.add(&history::HistoryItem {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        created_at: now_millis(),
+                        source: req.text.clone(),
+                        translation: text,
+                        source_lang: "auto".into(),
+                        target_lang,
+                        backend_id: backend.id.clone(),
+                        mode: mode_key(req.mode).to_string(),
+                    });
+                }
+            }
+            Err(e) => {
+                let _ = app.emit(
+                    "hymt2:error",
+                    serde_json::json!({ "job_id": job_id, "message": e.to_string() }),
+                );
+            }
+        }
+    });
+
+    Ok(())
 }
 
 fn now_millis() -> i64 {
@@ -266,11 +348,8 @@ fn glossary_import(
 
 // ---------- history ----------
 
-fn with_history<T>(
-    state: &State<'_, AppState>,
-    f: impl FnOnce(&History) -> AppResult<T>,
-) -> CmdResult<T> {
-    let mut guard = state.history.lock().unwrap();
+fn with_history<T>(f: impl FnOnce(&History) -> AppResult<T>) -> CmdResult<T> {
+    let mut guard = HISTORY.lock().unwrap();
     if guard.is_none() {
         *guard = Some(History::open()?);
     }
@@ -279,21 +358,20 @@ fn with_history<T>(
 
 #[tauri::command]
 fn history_list(
-    state: State<'_, AppState>,
     search: Option<String>,
     limit: Option<i64>,
 ) -> CmdResult<Vec<history::HistoryItem>> {
-    with_history(&state, |h| h.list(search.as_deref(), limit.unwrap_or(100)))
+    with_history(|h| h.list(search.as_deref(), limit.unwrap_or(100)))
 }
 
 #[tauri::command]
-fn history_delete(state: State<'_, AppState>, id: String) -> CmdResult<()> {
-    with_history(&state, |h| h.delete(&id))
+fn history_delete(id: String) -> CmdResult<()> {
+    with_history(|h| h.delete(&id))
 }
 
 #[tauri::command]
-fn history_clear(state: State<'_, AppState>) -> CmdResult<()> {
-    with_history(&state, |h| h.clear())
+fn history_clear() -> CmdResult<()> {
+    with_history(|h| h.clear())
 }
 
 // ---------- documents ----------
@@ -609,7 +687,6 @@ fn read_text_file(path: String) -> CmdResult<String> {
 pub fn run() {
     let settings = Settings::load();
     let glossary = Glossary::load();
-    let history = History::open().ok();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -617,7 +694,6 @@ pub fn run() {
             app.manage(AppState {
                 settings: Mutex::new(settings),
                 glossary: Mutex::new(glossary),
-                history: Mutex::new(history),
             });
             Ok(())
         })
@@ -629,6 +705,7 @@ pub fn run() {
             set_api_key,
             test_backend,
             translate,
+            translate_stream,
             preview_prompt,
             glossary_get,
             glossary_set_terms,

@@ -46,6 +46,8 @@ export const api = {
 
   translate: (req: TranslateRequest, saveHistory = true) =>
     invoke<TranslateResponse>('translate', { req, saveHistory }),
+  translateStream: (req: TranslateRequest, jobId: string) =>
+    invoke<void>('translate_stream', { req, jobId }),
   previewPrompt: (req: TranslateRequest) => invoke<string>('preview_prompt', { req }),
 
   glossaryGet: () => invoke<GlossaryView>('glossary_get'),
