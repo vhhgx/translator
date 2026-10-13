@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { listen } from '@tauri-apps/api/event'
+import LangSelect from '../components/LangSelect.vue'
 import { api, err, toast } from '../api'
 import { glossary, meta, pickBackend, settings } from '../composables/useAppState'
 import type { Mode, TermPair } from '../types'
@@ -8,7 +9,6 @@ import type { Mode, TermPair } from '../types'
 // ---------- state ----------
 const source = ref('')
 const result = ref('')
-const sourceLang = ref('自动检测')
 const targetLang = ref('英语')
 const mode = ref<Mode>('basic')
 const style = ref('日常口语化风格')
@@ -21,22 +21,15 @@ const busy = ref(false)
 const usedTerms = ref<string[]>([])
 const elapsed = ref(0)
 const showAdvanced = ref(false)
-const showAllLangs = ref(false)
 const currentJob = ref('')
 const failed = ref('')
-
-const MAX_CHARS = 5000
 
 // ---------- derived ----------
 const modeOptions = computed(() => meta.value.modes.map(([k, label]) => ({ value: k as Mode, label })))
 const styleOptions = computed(() => meta.value.styles)
 const formatOptions = computed(() => meta.value.format_types)
 
-const QUICK = ['英语', '中文', '日语', '韩语', '法语', '德语', '西班牙语']
-const allLangs = computed(() => meta.value.languages.map(([code, name]) => ({ value: name, code })))
-
-const tabsForSource = computed(() => ['自动检测', ...QUICK.filter((l) => l !== targetLang.value)])
-const tabsForTarget = computed(() => QUICK)
+const allLangs = computed<[string, string][]>(() => meta.value.languages)
 
 onMounted(() => {
   loadGlossaryTerms()
@@ -109,16 +102,11 @@ async function run() {
     toast('请输入要翻译的内容')
     return
   }
-  if (source.value.length > MAX_CHARS) {
-    failed.value = `超出 ${MAX_CHARS} 字上限（当前 ${source.value.length} 字），请分段翻译`
-    return
-  }
   busy.value = true
   failed.value = ''
   result.value = ''
   usedTerms.value = []
   elapsed.value = 0
-  showAllLangs.value = false
 
   const jobId = newJobId()
   currentJob.value = jobId
@@ -174,13 +162,12 @@ async function run() {
 onUnmounted(() => unlisten.forEach((f) => f()))
 
 // ---------- misc ----------
+// Hy-MT2 自动识别源语言，交换只需对调文本与目标语言
 function swap() {
   const t = source.value
   source.value = result.value
   result.value = t
-  const l = targetLang.value
-  targetLang.value = sourceLang.value === '自动检测' ? '英语' : sourceLang.value
-  sourceLang.value = l
+  targetLang.value = targetLang.value === '中文' ? '英语' : '中文'
 }
 
 async function copy(text: string) {
@@ -201,53 +188,13 @@ async function showPrompt() {
 
 <template>
   <div class="gt">
-    <!-- 语言选择 -->
+    <!-- 语言选择：Hy-MT2 自动识别源语言，因此只有目标语言可选 -->
     <div class="langrow">
-      <div class="langsel">
-        <button
-          v-for="t in tabsForSource"
-          :key="t"
-          class="pill"
-          :class="{ 'pill--on': t === sourceLang }"
-          @click="sourceLang = t"
-        >
-          {{ t }}
-        </button>
-        <button class="pill pill--chev" title="更多语言" @click="showAllLangs = !showAllLangs">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M6 9l6 6 6-6" />
-          </svg>
-        </button>
+      <div class="langrow__hint">源语言自动识别</div>
+      <div class="langrow__target">
+        <span class="langrow__label">译为</span>
+        <LangSelect v-model="targetLang" :options="allLangs" />
       </div>
-
-      <div class="langsel langsel--right">
-        <button
-          v-for="t in tabsForTarget"
-          :key="t"
-          class="pill"
-          :class="{ 'pill--on': t === targetLang }"
-          @click="targetLang = t"
-        >
-          {{ t }}
-        </button>
-        <button class="pill pill--chev" title="更多语言" @click="showAllLangs = !showAllLangs">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M6 9l6 6 6-6" />
-          </svg>
-        </button>
-      </div>
-    </div>
-
-    <div v-if="showAllLangs" class="langpanel">
-      <button
-        v-for="l in allLangs"
-        :key="l.code"
-        class="pill pill--sm"
-        :class="{ 'pill--on': l.value === targetLang }"
-        @click="targetLang = l.value; showAllLangs = false"
-      >
-        {{ l.value }}
-      </button>
     </div>
 
     <!-- 双栏 -->
@@ -261,7 +208,7 @@ async function showPrompt() {
           @keydown.ctrl.enter="run"
         />
         <div class="pane__bar">
-          <span class="count">{{ source.length }} / {{ MAX_CHARS }}</span>
+          <span class="count">{{ source.length }} 字</span>
           <span class="grow" />
           <button class="tbtn" @click="showAdvanced = !showAdvanced">
             高级
@@ -387,33 +334,37 @@ async function showPrompt() {
   overflow-y: auto;
 }
 
-/* 语言选择行 */
+/* 语言选择行：左侧提示自动识别，右侧为目标语言下拉 */
 .langrow {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: var(--sp-6);
-  padding-bottom: var(--sp-1);
-}
-
-.langsel {
   display: flex;
   align-items: center;
-  gap: var(--sp-1);
-  overflow-x: auto;
-  scrollbar-width: none;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  padding-bottom: var(--sp-2);
 }
 
-.langsel::-webkit-scrollbar {
-  display: none;
+.langrow__hint {
+  font-size: 13px;
+  color: var(--c-text-tertiary);
 }
 
-.langsel--right {
-  justify-content: flex-end;
+.langrow__target {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.langrow__label {
+  font-size: 13px;
+  color: var(--c-text-secondary);
 }
 
 /* 药丸 */
 .pill {
-  padding: 9px 14px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
   font-family: inherit;
   font-size: 14px;
   color: var(--c-text-secondary);
@@ -436,26 +387,6 @@ async function showPrompt() {
 
 .pill--on:hover {
   background: var(--c-pill-bg);
-}
-
-.pill--chev {
-  display: inline-flex;
-  align-items: center;
-  padding: 9px 10px;
-}
-
-.pill--sm {
-  padding: 3px 10px;
-  font-size: 12px;
-}
-
-.langpanel {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  padding: var(--sp-3);
-  background: var(--c-surface-alt);
-  border-radius: var(--r-md);
 }
 
 /* 双栏 */

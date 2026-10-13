@@ -1,9 +1,21 @@
 import { ref, computed } from 'vue'
 import { api, err } from '../api'
+import {
+  FALLBACK_FORMAT_TYPES,
+  FALLBACK_LANGUAGES,
+  FALLBACK_MODES,
+  FALLBACK_STYLES
+} from '../constants'
 import type { Backend, GlossaryView, Meta, Settings, TermPair, TranslateRequest } from '../types'
 
 /** 全局共享的应用状态：后端配置、术语库、元数据 */
-export const meta = ref<Meta>({ languages: [], styles: [], format_types: [], modes: [] })
+// 先用静态兜底填充，避免元数据到达前界面空白
+export const meta = ref<Meta>({
+  languages: FALLBACK_LANGUAGES,
+  styles: FALLBACK_STYLES,
+  format_types: FALLBACK_FORMAT_TYPES,
+  modes: FALLBACK_MODES
+})
 export const settings = ref<Settings>({ backends: [], active_id: '', temperature: 0.1, timeout_secs: 300 })
 export const glossary = ref<GlossaryView>({ active: '', names: [], terms: [] })
 export const ready = ref(false)
@@ -16,7 +28,14 @@ export const langName = (code: string): string =>
   meta.value.languages.find(([c]) => c === code)?.[1] ?? code
 
 export async function loadMeta() {
-  meta.value = await api.getMeta()
+  const m = await api.getMeta()
+  // 后端返回为空时保留兜底数据
+  meta.value = {
+    languages: m.languages?.length ? m.languages : FALLBACK_LANGUAGES,
+    styles: m.styles?.length ? m.styles : FALLBACK_STYLES,
+    format_types: m.format_types?.length ? m.format_types : FALLBACK_FORMAT_TYPES,
+    modes: m.modes?.length ? m.modes : FALLBACK_MODES
+  }
 }
 
 export async function loadSettings() {
