@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from 'vue'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import { toasts } from './api'
 import { activeBackend, pickBackend, reloadAll, settings } from './composables/useAppState'
 import BatchView from './views/BatchView.vue'
@@ -54,6 +55,60 @@ async function chooseBackend(id: string) {
   await pickBackend(id)
 }
 
+// ---------- 自绘窗口控制（decorations: false 后系统标题栏已移除） ----------
+const maximized = ref(false)
+
+/** 浏览器预览没有 Tauri IPC，此时静默跳过而不是抛错。 */
+function win() {
+  try {
+    return getCurrentWindow()
+  } catch {
+    return null
+  }
+}
+
+async function syncMaximized() {
+  const w = win()
+  if (!w) return
+  try {
+    maximized.value = await w.isMaximized()
+  } catch {}
+}
+
+async function minimize() {
+  await win()?.minimize()
+}
+
+async function toggleMaximize() {
+  const w = win()
+  if (!w) return
+  await w.toggleMaximize()
+  await syncMaximized()
+}
+
+async function closeWindow() {
+  await win()?.close()
+}
+
+/** 标题栏空白处按下即拖拽窗口；落在按钮上则不触发，否则点不到按钮。 */
+function startDrag(e: MouseEvent) {
+  if ((e.target as HTMLElement).closest('button')) return
+  win()?.startDragging()
+}
+
+/** 双击标题栏空白处切换最大化。按钮区不触发，避免和点击冲突。 */
+function onTitleDblClick(e: MouseEvent) {
+  if ((e.target as HTMLElement).closest('button')) return
+  toggleMaximize()
+}
+
+onMounted(() => {
+  syncMaximized()
+  window.addEventListener('resize', syncMaximized)
+})
+
+onUnmounted(() => window.removeEventListener('resize', syncMaximized))
+
 function go(t: Tab) {
   tab.value = t
   menuOpen.value = false
@@ -69,8 +124,8 @@ function reuse(item: HistoryItem) {
 <template>
   <div class="window-shell">
     <div class="card-container">
-      <!-- 顶栏：严格参考 Google Translate 新版 -->
-      <header class="topbar">
+      <!-- 顶栏兼作标题栏：空白处可拖拽移动窗口，双击切换最大化 -->
+      <header class="topbar" @mousedown="startDrag" @dblclick="onTitleDblClick">
         <div class="topbar__left">
           <button class="icon-btn" title="主菜单" @click="menuOpen = !menuOpen">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -161,6 +216,29 @@ function reuse(item: HistoryItem) {
             </div>
           </div>
         </div>
+
+        <!-- 自绘窗口控制：系统装饰已关闭 -->
+        <div class="wincontrols">
+          <button class="winbtn" title="最小化" @click="minimize">
+            <svg width="10" height="10" viewBox="0 0 10 10">
+              <rect x="0" y="4.5" width="10" height="1" fill="currentColor" />
+            </svg>
+          </button>
+          <button class="winbtn" :title="maximized ? '还原' : '最大化'" @click="toggleMaximize">
+            <svg v-if="maximized" width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1">
+              <rect x="0.5" y="2.5" width="7" height="7" />
+              <path d="M2.5 2.5V0.5h7v7h-2" />
+            </svg>
+            <svg v-else width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1">
+              <rect x="0.5" y="0.5" width="9" height="9" />
+            </svg>
+          </button>
+          <button class="winbtn winbtn--close" title="关闭" @click="closeWindow">
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.2">
+              <path d="M0 0l10 10M10 0L0 10" />
+            </svg>
+          </button>
+        </div>
       </header>
 
       <!-- 下拉导航菜单 -->
@@ -198,39 +276,32 @@ function reuse(item: HistoryItem) {
 </template>
 
 <style scoped>
+/* 自绘窗口：无系统边框，铺满整个窗口，不要内边距与圆角 */
 .window-shell {
-  display: flex;
-  justify-content: center;
-  align-items: center;
   width: 100vw;
   height: 100vh;
-  padding: 16px;
-  background: var(--c-app-bg);
-  box-sizing: border-box;
+  background: var(--c-bg);
+  overflow: hidden;
 }
 
 .card-container {
   display: flex;
   flex-direction: column;
   width: 100%;
-  max-width: 1440px;
   height: 100%;
   background: var(--c-bg);
-  border-radius: var(--r-container);
-  box-shadow: 0 8px 32px rgba(60, 64, 67, 0.08);
   overflow: hidden;
   position: relative;
 }
 
-/* 顶栏 */
+/* 顶栏兼标题栏，右侧留出窗口按钮的位置 */
 .topbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  height: 64px;
-  padding: 0 24px;
+  height: 40px;
+  padding: 0 0 0 12px;
   background: var(--c-surface);
-  border-bottom: 1px solid var(--c-border-soft);
   flex-shrink: 0;
   user-select: none;
 }
@@ -410,10 +481,40 @@ function reuse(item: HistoryItem) {
   color: var(--c-primary);
 }
 
+/* 自绘窗口按钮：对齐 Windows 原生尺寸，关闭悬停转红 */
+.wincontrols {
+  display: flex;
+  align-items: stretch;
+  align-self: stretch;
+  margin-left: 8px;
+}
+
+.winbtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 46px;
+  border: none;
+  background: none;
+  color: var(--c-text-secondary);
+  cursor: pointer;
+  transition: background 0.12s;
+}
+
+.winbtn:hover {
+  background: var(--c-surface-hover);
+  color: var(--c-text);
+}
+
+.winbtn--close:hover {
+  background: #e81123;
+  color: #fff;
+}
+
 /* 下拉菜单 */
 .menu {
   position: absolute;
-  top: 68px;
+  top: 44px;
   left: 20px;
   z-index: 50;
   display: flex;

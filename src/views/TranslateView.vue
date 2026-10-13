@@ -6,10 +6,14 @@ import { api, err, toast } from '../api'
 import { glossary, meta } from '../composables/useAppState'
 import type { Mode, TermPair } from '../types'
 
+/** 「自动检测」在 UI 里的名字。左右两栏都用中文名比对，故只存这一个值。 */
+const AUTO_LANG = '检测语言'
+
 // ---------- state ----------
 const source = ref('')
 const result = ref('')
-const sourceLang = ref('auto')
+/** 源语言：统一用中文名存储。检测语言是保留选项，可能出错，用户可手动改。 */
+const sourceLang = ref(AUTO_LANG)
 const targetLang = ref('英语')
 const mode = ref<Mode>('basic')
 const style = ref('日常口语化风格')
@@ -29,20 +33,10 @@ const autoTranslate = ref(true)
 /** 当前译文是否已收藏，持久化在 localStorage */
 const starred = ref(false)
 
-// 设计图常用语言快捷药丸（用户可一键切换，也可点下拉选全部 38 种）
-const quickSourceLangs = [
-  { code: 'auto', name: '检测语言' },
-  { code: 'zh', name: '中文' },
-  { code: 'en', name: '英语' },
-  { code: 'ja', name: '日语' }
-]
+// 常用语言快捷药丸，与下拉统一使用中文名
+const quickSourceLangs = [AUTO_LANG, '中文', '英语', '日语']
 
-const quickTargetLangs = [
-  { code: 'en', name: '英语' },
-  { code: 'zh', name: '中文' },
-  { code: 'ja', name: '日语' },
-  { code: 'ko', name: '韩语' }
-]
+const quickTargetLangs = ['英语', '中文', '日语', '韩语']
 
 /** 最近一次完成翻译的原文，用来识别「只是改了内容」还是「原样重跑」。 */
 let lastTranslated = ''
@@ -55,6 +49,9 @@ const modeOptions = computed(() => meta.value.modes.map(([k, label]) => ({ value
 const styleOptions = computed(() => meta.value.styles)
 const formatOptions = computed(() => meta.value.format_types)
 const allLangs = computed<[string, string][]>(() => meta.value.languages)
+
+/** 源语言下拉要比目标语言多一项「自动检测」，用同样的中文名参与比对。 */
+const sourceLangOptions = computed<[string, string][]>(() => [['auto', AUTO_LANG], ...allLangs.value])
 
 /** 收藏以「原文+译文」为键，换一段文本就是另一条收藏。 */
 const starKey = computed(() => `${source.value}\u0000${result.value}`)
@@ -255,11 +252,31 @@ watch(busy, (isBusy) => {
   scheduleAuto()
 })
 
+/**
+ * 源语言为「自动检测」时无法对称交换——反方向该译成什么语言是未知的，
+ * 此时只允许交换语言方向，不搬动文本。
+ */
+const swapHint = computed(() =>
+  sourceLang.value === AUTO_LANG
+    ? '请先手动指定源语言，再交换方向'
+    : result.value.trim()
+      ? '交换语言与内容'
+      : '交换翻译方向'
+)
+
 function swap() {
-  const t = source.value
+  if (sourceLang.value === AUTO_LANG) {
+    toast('源语言是「检测语言」，请先手动指定后再交换', 'error')
+    return
+  }
+  const ls = sourceLang.value
+  sourceLang.value = targetLang.value
+  targetLang.value = ls
+  // 没有译文时只换语言方向，不能把用户刚输入的原文挪进只读的译文区。
+  if (!result.value.trim()) return
+  const text = source.value
   source.value = result.value
-  result.value = t
-  targetLang.value = targetLang.value === '中文' ? '英语' : '中文'
+  result.value = text
   lastTranslated = source.value
 }
 
@@ -290,14 +307,14 @@ async function showPrompt() {
           <div class="lang-group">
             <button
               v-for="l in quickSourceLangs"
-              :key="l.code"
+              :key="l"
               class="lang-pill"
-              :class="{ 'lang-pill--active': sourceLang === l.code }"
-              @click="sourceLang = l.code"
+              :class="{ 'lang-pill--active': sourceLang === l }"
+              @click="sourceLang = l"
             >
-              {{ l.name }}
+              {{ l }}
             </button>
-            <LangSelect v-model="sourceLang" :options="allLangs" />
+            <LangSelect v-model="sourceLang" :options="sourceLangOptions" />
           </div>
         </header>
 
@@ -369,7 +386,12 @@ async function showPrompt() {
 
       <!-- 中央正中浮动圆形交换按钮 -->
       <div class="swap-dock">
-        <button class="floating-swap-btn" title="交换语言与内容" @click="swap">
+        <button
+          class="floating-swap-btn"
+          :class="{ 'floating-swap-btn--dim': sourceLang === AUTO_LANG }"
+          :title="swapHint"
+          @click="swap"
+        >
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M8 3L4 7l4 4" />
             <path d="M4 7h16" />
@@ -386,12 +408,12 @@ async function showPrompt() {
           <div class="lang-group">
             <button
               v-for="l in quickTargetLangs"
-              :key="l.code"
+              :key="l"
               class="lang-pill"
-              :class="{ 'lang-pill--active': targetLang === l.name }"
-              @click="targetLang = l.name"
+              :class="{ 'lang-pill--active': targetLang === l }"
+              @click="targetLang = l"
             >
-              {{ l.name }}
+              {{ l }}
             </button>
             <LangSelect v-model="targetLang" :options="allLangs" align="right" />
           </div>
@@ -447,7 +469,7 @@ async function showPrompt() {
             <button
               class="footer-icon-btn"
               :disabled="!result"
-              title="反向翻译"
+              :title="swapHint"
               @click="swap"
             >
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -852,6 +874,19 @@ async function showPrompt() {
   color: var(--c-primary);
   transform: scale(1.1);
   box-shadow: 0 4px 16px rgba(26, 115, 232, 0.2);
+}
+
+/* 源语言为自动检测时反方向未知，置灰提示 */
+.floating-swap-btn--dim {
+  color: var(--c-text-tertiary);
+  opacity: 0.55;
+}
+
+.floating-swap-btn--dim:hover {
+  color: var(--c-text-tertiary);
+  background: #ffffff;
+  transform: scale(1.05);
+  box-shadow: 0 3px 12px rgba(60, 64, 67, 0.12);
 }
 
 /* 高级配置抽屉 */

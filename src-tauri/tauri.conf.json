@@ -19,7 +19,9 @@
         "minHeight": 600,
         "resizable": true,
         "theme": "Light",
-        "label": "main"
+        "label": "main",
+        "decorations": false,
+        "shadow": true
       }
     ],
     "security": {
