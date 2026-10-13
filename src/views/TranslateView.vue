@@ -33,10 +33,42 @@ const inputEl = ref<HTMLTextAreaElement | null>(null)
 /** 当前译文是否已收藏，持久化在 localStorage */
 const starred = ref(false)
 
-// 常用语言快捷药丸，与下拉统一使用中文名
-const quickSourceLangs = [AUTO_LANG, '中文', '英语', '日语']
+/**
+ * 表头快捷药丸：固定保留中英文，其余语言要用户从下拉里选过才会出现。
+ * 用户选过的语种记在 localStorage，重开应用仍然在；超出上限则淘汰最早的。
+ */
+const SEED_SOURCE = [AUTO_LANG, '中文', '英语']
+const SEED_TARGET = ['英语', '中文']
+const MAX_USER_PICKS = 3
 
-const quickTargetLangs = ['英语', '中文', '日语', '韩语']
+type PickSide = 'src' | 'tgt'
+
+function loadPicks(side: PickSide): string[] {
+  try {
+    const raw = localStorage.getItem(`hymt2:picks:${side}`)
+    const list = raw ? (JSON.parse(raw) as string[]) : []
+    return list.filter((x) => typeof x === 'string' && x).slice(0, MAX_USER_PICKS)
+  } catch {
+    return []
+  }
+}
+
+const sourcePicks = ref<string[]>(loadPicks('src'))
+const targetPicks = ref<string[]>(loadPicks('tgt'))
+
+const sourcePills = computed(() => [...new Set([...SEED_SOURCE, ...sourcePicks.value])])
+const targetPills = computed(() => [...new Set([...SEED_TARGET, ...targetPicks.value])])
+
+/** 选了非固定语种才记住；种子语种本来就在表头上，不必记。 */
+function rememberPick(side: PickSide, lang: string) {
+  const seed = side === 'src' ? SEED_SOURCE : SEED_TARGET
+  if (seed.includes(lang)) return
+  const current = side === 'src' ? sourcePicks.value : targetPicks.value
+  const next = [lang, ...current.filter((x) => x !== lang)].slice(0, MAX_USER_PICKS)
+  localStorage.setItem(`hymt2:picks:${side}`, JSON.stringify(next))
+  if (side === 'src') sourcePicks.value = next
+  else targetPicks.value = next
+}
 
 /** 最近一次完成翻译的原文，用来识别「只是改了内容」还是「原样重跑」。 */
 let lastTranslated = ''
@@ -245,6 +277,10 @@ function scheduleAuto() {
 // 自动翻译是默认且唯一的行为，不再提供开关
 watch(source, scheduleAuto)
 
+// 无论从药丸还是从下拉切换语言，都把它记进表头快捷项
+watch(sourceLang, (v) => rememberPick('src', v))
+watch(targetLang, (v) => rememberPick('tgt', v))
+
 watch(busy, (isBusy) => {
   if (isBusy || !autoPending) return
   autoPending = false
@@ -294,15 +330,17 @@ async function copy(text: string) {
         <!-- 语言选择胶囊行 -->
         <header class="card-pane__header">
           <div class="lang-group">
-            <button
-              v-for="l in quickSourceLangs"
-              :key="l"
-              class="lang-pill"
-              :class="{ 'lang-pill--active': sourceLang === l }"
-              @click="sourceLang = l"
-            >
-              {{ l }}
-            </button>
+            <div class="lang-pills">
+              <button
+                v-for="l in sourcePills"
+                :key="l"
+                class="lang-pill"
+                :class="{ 'lang-pill--active': sourceLang === l }"
+                @click="sourceLang = l"
+              >
+                {{ l }}
+              </button>
+            </div>
             <LangSelect v-model="sourceLang" :options="sourceLangOptions" />
           </div>
         </header>
@@ -372,18 +410,20 @@ async function copy(text: string) {
       <section class="card-pane card-pane--out">
         <!-- 目标语言选择胶囊行 -->
         <header class="card-pane__header">
-          <div class="lang-group">
-            <button
-              v-for="l in quickTargetLangs"
-              :key="l"
-              class="lang-pill"
-              :class="{ 'lang-pill--active': targetLang === l }"
-              @click="targetLang = l"
-            >
-              {{ l }}
-            </button>
-            <LangSelect v-model="targetLang" :options="allLangs" align="right" />
-          </div>
+            <div class="lang-group">
+              <div class="lang-pills">
+                <button
+                  v-for="l in targetPills"
+                  :key="l"
+                  class="lang-pill"
+                  :class="{ 'lang-pill--active': targetLang === l }"
+                  @click="targetLang = l"
+                >
+                  {{ l }}
+                </button>
+              </div>
+              <LangSelect v-model="targetLang" :options="allLangs" align="right" />
+            </div>
 
           <!-- 右上角收藏星标 -->
           <button
@@ -535,12 +575,14 @@ async function copy(text: string) {
   box-shadow: none;
 }
 
-/* 卡片顶部语言药丸栏 */
+/* 卡片顶部语言药丸栏。--header-h / --pill-h 供选中下划线定位用 */
 .card-pane__header {
+  --header-h: 52px;
+  --pill-h: 36px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  height: 52px;
+  height: var(--header-h);
   padding: 0 16px;
   border-bottom: 1px solid rgba(0, 0, 0, 0.05);
 }
@@ -549,12 +591,32 @@ async function copy(text: string) {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+
+/* 语种多到放不下时只让这一段横向滚动，下拉箭头始终留在可视区 */
+.lang-pills {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.lang-pills::-webkit-scrollbar {
+  display: none;
 }
 
 /* 选中态用底部横线表示，不再铺药丸底色 */
 .lang-pill {
   position: relative;
-  padding: 8px 16px;
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  height: var(--pill-h);
+  padding: 0 16px;
   font-family: inherit;
   font-size: 14px;
   font-weight: 500;
@@ -575,12 +637,14 @@ async function copy(text: string) {
   font-weight: 600;
 }
 
+/* 药丸在表头里垂直居中，它到底部边框的距离是 (header-h - pill-h) / 2。
+   取负值让蓝线正好压在 border 上，而不是浮在药丸底下。 */
 .lang-pill--active::after {
   content: '';
   position: absolute;
   left: 12px;
   right: 12px;
-  bottom: 1px;
+  bottom: calc((var(--pill-h) - var(--header-h)) / 2);
   height: 2px;
   background: var(--c-primary);
   border-radius: 2px;
@@ -590,6 +654,7 @@ async function copy(text: string) {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
   width: 36px;
   height: 36px;
   background: none;
