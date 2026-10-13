@@ -3,31 +3,36 @@
  */
 
 :root {
-  /* 色彩：克制的浅色主题，参考 Google Translate 的观感 */
+  /* 色彩：对齐 Google 翻译的观感 —— 大面积留白 + 淡蓝强调 + 药丸形状 */
   --c-bg: #ffffff;
   --c-surface: #ffffff;
   --c-surface-alt: #f8f9fa;
   --c-surface-hover: #f1f3f4;
+  --c-card: #eef1f5;
   --c-border: #dadce0;
   --c-border-soft: #e8eaed;
+  --c-divider: #e8eaed;
   --c-text: #202124;
   --c-text-secondary: #5f6368;
   --c-text-tertiary: #80868b;
   --c-primary: #1a73e8;
-  --c-primary-hover: #1765cc;
+  --c-primary-hover: #1967d2;
   --c-primary-soft: #e8f0fe;
+  --c-pill-bg: #d2e3fc;
+  --c-pill-text: #185abc;
   --c-danger: #d93025;
   --c-success: #188038;
   --c-warning: #e37400;
 
-  /* 圆角与阴影 */
+  /* 圆角与阴影：Google 用的是大圆角 + 极轻投影 */
   --r-sm: 4px;
   --r-md: 8px;
   --r-lg: 12px;
-  --r-full: 999px;
-  --shadow-sm: 0 1px 2px rgba(60, 64, 67, 0.1);
-  --shadow-md: 0 2px 6px rgba(60, 64, 67, 0.15);
-  --shadow-lg: 0 4px 16px rgba(60, 64, 67, 0.2);
+  --r-xl: 16px;
+  --r-pill: 999px;
+  --shadow-sm: 0 1px 2px rgba(60, 64, 67, 0.08);
+  --shadow-md: 0 1px 3px rgba(60, 64, 67, 0.12);
+  --shadow-float: 0 2px 8px rgba(60, 64, 67, 0.16);
 
   /* 间距 */
   --sp-1: 4px;
@@ -80,7 +85,7 @@ body {
   color: var(--c-text);
   background: var(--c-surface);
   border: 1px solid var(--c-border);
-  border-radius: var(--r-full);
+  border-radius: var(--r-pill);
   cursor: pointer;
   transition:
     background 0.15s,
@@ -146,7 +151,7 @@ body {
   padding: 6px;
   width: 32px;
   height: 32px;
-  border-radius: var(--r-full);
+  border-radius: var(--r-pill);
 }
 
 /* 输入 */
@@ -218,7 +223,7 @@ body {
   gap: 4px;
   padding: 2px 8px;
   font-size: 12px;
-  border-radius: var(--r-full);
+  border-radius: var(--r-pill);
   background: var(--c-surface-hover);
   color: var(--c-text-secondary);
 }
@@ -269,7 +274,7 @@ body {
 
 ::-webkit-scrollbar-thumb {
   background: var(--c-border);
-  border-radius: var(--r-full);
+  border-radius: var(--r-pill);
   border: 2px solid transparent;
   background-clip: content-box;
 }
@@ -296,7 +301,7 @@ body {
   color: #fff;
   background: #3c4043;
   border-radius: var(--r-md);
-  box-shadow: var(--shadow-lg);
+  box-shadow: var(--shadow-float);
   animation: toast-in 0.2s ease;
 }
 
