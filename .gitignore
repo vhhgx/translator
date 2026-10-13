@@ -32,3 +32,7 @@ Thumbs.db
 
 # rust
 **/*.rs.bkscripts/app-screenshot.png
+
+# release artifacts
+*.exe
+scripts/app-*.png

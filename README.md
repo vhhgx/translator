@@ -20,10 +20,23 @@ Rust 只负责界面宿主与 IO —— 配置、凭据、HTTP 调用、文档�
 ```bash
 pnpm install
 pnpm app:dev          # 开发模式
-pnpm app:build        # 打包成 NSIS 安装包
+pnpm app:build        # 打包 release
 ```
 
 首次 `cargo build` 冷编译约 3–8 分钟。
+
+### 关于安装包
+
+`pnpm app:build` 会先编译出 `src-tauri/target/release/hy-mt2-translator.exe`（约 6 MB），再尝试用 NSIS 生成安装包。**NSIS 工具需要联网下载**，在国内网络下可能失败。
+
+即使失败也不影响使用——**exe 本身是自包含的绿色版**，双击即可运行，无需安装。已验证的副本在项目根目录 `Hy-MT2-翻译工具.exe`。
+
+若确实需要安装包，先装 NSIS 再打包：
+
+```bash
+choco install nsis
+pnpm app:build
+```
 
 ### 接入本地模型（可选）
 
