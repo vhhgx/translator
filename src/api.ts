@@ -44,6 +44,15 @@ export const api = {
     invoke<{ backend_id: string; has_key: boolean }>('set_api_key', { backendId, apiKey }),
   testBackend: (backend: Backend) => invoke<string[]>('test_backend', { backend }),
 
+  // ---------- 托盘 / 全局热键 / 开机自启 ----------
+  // 热键注册失败时后端会返回错误文本（多半是被别的软件占用），必须展示给用户
+  setHotkey: (accel: string) => invoke<string>('set_hotkey', { accel }),
+  getHotkey: () => invoke<string>('get_hotkey'),
+  hotkeyStatus: () => invoke<{ accel: string; registered: boolean }>('hotkey_status'),
+  getAutostart: () => invoke<boolean>('get_autostart'),
+  setAutostart: (enable: boolean) => invoke<void>('set_autostart', { enable }),
+  showWindow: () => invoke<void>('show_window'),
+
   translate: (req: TranslateRequest, saveHistory = true) =>
     invoke<TranslateResponse>('translate', { req, saveHistory }),
   translateStream: (req: TranslateRequest, jobId: string) =>

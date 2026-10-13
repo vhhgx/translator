@@ -33,6 +33,12 @@ pub struct Settings {
     pub temperature: f32,
     #[serde(default = "default_timeout")]
     pub timeout_secs: u64,
+    /// 点关闭时隐藏到托盘而不是退出，否则全局热键会跟着进程一起消失。
+    #[serde(default = "default_true")]
+    pub close_to_tray: bool,
+    /// 显示/隐藏窗口的全局热键，写成 "Ctrl+Shift+D" 这样的形式。
+    #[serde(default = "default_hotkey")]
+    pub hotkey_toggle: String,
 }
 
 fn default_temperature() -> f32 {
@@ -40,6 +46,12 @@ fn default_temperature() -> f32 {
 }
 fn default_timeout() -> u64 {
     300
+}
+fn default_true() -> bool {
+    true
+}
+fn default_hotkey() -> String {
+    "Ctrl+Shift+D".to_string()
 }
 
 impl Default for Settings {
@@ -64,6 +76,8 @@ impl Default for Settings {
             active_id: "local".into(),
             temperature: default_temperature(),
             timeout_secs: default_timeout(),
+            close_to_tray: default_true(),
+            hotkey_toggle: default_hotkey(),
         }
     }
 }

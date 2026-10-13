@@ -2,7 +2,7 @@
 import { onMounted, onUnmounted, ref } from 'vue'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { toasts } from './api'
-import { reloadAll } from './composables/useAppState'
+import { reloadAll, settings } from './composables/useAppState'
 import BatchView from './views/BatchView.vue'
 import DocumentView from './views/DocumentView.vue'
 import GlossaryView from './views/GlossaryView.vue'
@@ -65,8 +65,18 @@ async function toggleMaximize() {
   await syncMaximized()
 }
 
+/**
+ * 关闭按钮。开启「关闭到托盘」时只隐藏窗口——进程必须留着，
+ * 否则全局热键会跟着一起消失，托盘图标也一并没了。
+ */
 async function closeWindow() {
-  await win()?.close()
+  const w = win()
+  if (!w) return
+  if (settings.value.close_to_tray) {
+    await w.hide()
+  } else {
+    await w.close()
+  }
 }
 
 /** 标题栏空白处按下即拖拽窗口；落在按钮上则不触发，否则点不到按钮。 */

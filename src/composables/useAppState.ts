@@ -16,7 +16,14 @@ export const meta = ref<Meta>({
   format_types: FALLBACK_FORMAT_TYPES,
   modes: FALLBACK_MODES
 })
-export const settings = ref<Settings>({ backends: [], active_id: '', temperature: 0.1, timeout_secs: 300 })
+export const settings = ref<Settings>({
+  backends: [],
+  active_id: '',
+  temperature: 0.1,
+  timeout_secs: 300,
+  close_to_tray: true,
+  hotkey_toggle: 'Ctrl+Shift+D'
+})
 export const glossary = ref<GlossaryView>({ active: '', names: [], terms: [] })
 export const ready = ref(false)
 

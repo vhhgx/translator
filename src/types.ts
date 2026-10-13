@@ -15,6 +15,10 @@ export interface Settings {
   active_id: string
   temperature: number
   timeout_secs: number
+  /** 点关闭时隐藏到托盘而不是退出，否则全局热键会跟着进程一起消失 */
+  close_to_tray: boolean
+  /** 显示/隐藏窗口的全局热键，如 "Ctrl+Shift+D"；空串表示不注册 */
+  hotkey_toggle: string
 }
 
 /** 一条术语：[源词, 译词] */

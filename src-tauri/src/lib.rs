@@ -10,11 +10,13 @@ pub mod error;
 pub mod glossary;
 pub mod history;
 pub mod prompt;
+pub mod tray;
 
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use tauri::{Manager, State};
+use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
 use client::{TranslateRequest, TranslateResponse};
 use config::{Backend, Settings};
@@ -89,6 +91,86 @@ fn save_settings(state: State<'_, AppState>, mut s: Settings) -> CmdResult<()> {
     s.save()?;
     *state.settings.lock().unwrap() = s;
     Ok(())
+}
+
+// ---------- 托盘 / 全局热键 / 开机自启 ----------
+
+/// 热键换绑。注册失败时返回错误文本，界面必须显示出来——Windows 上
+/// RegisterHotKey 冲突是静默失败的，不提示用户会以为功能没生效。
+#[tauri::command]
+fn set_hotkey(app: tauri::AppHandle, state: State<'_, AppState>, accel: String) -> CmdResult<String> {
+    let accel = accel.trim().to_string();
+    if accel.is_empty() {
+        // 空字符串表示不要全局热键
+        let _ = app.global_shortcut().unregister_all();
+        let mut s = state.settings.lock().unwrap();
+        s.hotkey_toggle = String::new();
+        s.save()?;
+        return Ok(String::new());
+    }
+    match tray::rebind_hotkey(&app, &accel) {
+        Ok(()) => {
+            let mut s = state.settings.lock().unwrap();
+            s.hotkey_toggle = accel.clone();
+            s.save()?;
+            Ok(accel)
+        }
+        Err(e) => Err(AppError::Io(e)),
+    }
+}
+
+#[tauri::command]
+fn get_hotkey(state: State<'_, AppState>) -> String {
+    state.settings.lock().unwrap().hotkey_toggle.clone()
+}
+
+/// 查询热键当前的真实注册状态。
+///
+/// 不能只靠启动时推事件：setup() 早于前端挂载 listen()，那条事件必然
+/// 被丢掉，界面会一直显示不出状态。所以让前端能主动查一次。
+#[derive(Serialize)]
+pub struct HotkeyStatus {
+    pub accel: String,
+    pub registered: bool,
+}
+
+#[tauri::command]
+fn hotkey_status(app: tauri::AppHandle, state: State<'_, AppState>) -> HotkeyStatus {
+    let accel = state.settings.lock().unwrap().hotkey_toggle.clone();
+    let registered = if accel.trim().is_empty() {
+        false
+    } else {
+        accel
+            .parse::<tauri_plugin_global_shortcut::Shortcut>()
+            .map(|sc| app.global_shortcut().is_registered(sc))
+            .unwrap_or(false)
+    };
+    HotkeyStatus { accel, registered }
+}
+
+/// 开机自启状态以系统实际注册情况为准，不信任前端缓存。
+#[tauri::command]
+fn get_autostart(app: tauri::AppHandle) -> bool {
+    use tauri_plugin_autostart::ManagerExt;
+    app.autolaunch().is_enabled().unwrap_or(false)
+}
+
+#[tauri::command]
+fn set_autostart(app: tauri::AppHandle, enable: bool) -> CmdResult<()> {
+    use tauri_plugin_autostart::ManagerExt;
+    let m = app.autolaunch();
+    let r = if enable {
+        m.enable()
+    } else {
+        m.disable()
+    };
+    r.map_err(|e| AppError::Io(e.to_string()))
+}
+
+/// 从托盘或热键唤出窗口，也给前端「显示窗口」用。
+#[tauri::command]
+fn show_window(app: tauri::AppHandle) {
+    tray::show_window(&app);
 }
 
 #[tauri::command]
@@ -690,17 +772,60 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
+        // 关闭事件挂在 Builder 上。状态在 setup 里才 manage，所以运行时再取，
+        // 取不到就按「隐藏到托盘」处理，避免关窗直接杀掉进程导致热键失效。
+        .on_window_event(|win, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let close_to_tray = win
+                    .app_handle()
+                    .try_state::<AppState>()
+                    .map(|st| st.settings.lock().unwrap().close_to_tray)
+                    .unwrap_or(true);
+                if close_to_tray {
+                    api.prevent_close();
+                    let _ = win.hide();
+                }
+            }
+        })
         .setup(move |app| {
             app.manage(AppState {
                 settings: Mutex::new(settings),
                 glossary: Mutex::new(glossary),
             });
+
+            let handle = app.handle().clone();
+            let hotkey = {
+                let st = handle.state::<AppState>();
+                let guard = st.settings.lock().unwrap();
+                // 显式绑定 guard：块尾表达式里的临时值会活到块末，比 st 还晚，
+                // 那样会让借用活得比它依赖的 State 更久，编译不过。
+                let hk = guard.hotkey_toggle.clone();
+                hk
+            };
+
+            tray::build_tray(&handle)?;
+            match tray::rebind_hotkey(&handle, &hotkey) {
+                Ok(()) => tray::notify_hotkey(&handle, true, format!("全局热键已注册：{hotkey}")),
+                Err(e) => tray::notify_hotkey(&handle, false, e),
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             get_meta,
             get_settings,
             save_settings,
+            set_hotkey,
+            get_hotkey,
+            hotkey_status,
+            get_autostart,
+            set_autostart,
+            show_window,
             set_active_backend,
             set_api_key,
             test_backend,

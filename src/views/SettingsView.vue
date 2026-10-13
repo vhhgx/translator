@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { onMounted, ref } from 'vue'
+import { listen } from '@tauri-apps/api/event'
 import { api, err, toast } from '../api'
 import { activeBackend, saveSettings, settings } from '../composables/useAppState'
 import type { Backend } from '../types'
@@ -7,6 +8,97 @@ import type { Backend } from '../types'
 const testing = ref('')
 const testResult = ref<Record<string, string>>({})
 const keyInputs = ref<Record<string, string>>({})
+
+// ---------- 托盘 / 热键 / 自启 ----------
+const autostart = ref(false)
+const hotkeyInput = ref('')
+const hotkeyState = ref<{ ok: boolean; message: string } | null>(null)
+const recording = ref(false)
+
+/** 录制热键时用到的修饰键集合。 */
+const MODS = ['Control', 'Alt', 'Shift', 'Meta']
+
+function prettyHotkey(e: KeyboardEvent): string | null {
+  const key = e.key
+  if (['Control', 'Shift', 'Alt', 'Meta'].includes(key)) return null
+  const mods = MODS.filter((m) => e.getModifierState(m))
+  if (!mods.length) return null
+  const names: Record<string, string> = {
+    Control: 'Ctrl',
+    Alt: 'Alt',
+    Shift: 'Shift',
+    Meta: 'Super'
+  }
+  return [...mods.map((m) => names[m]), key.length === 1 ? key.toUpperCase() : key].join('+')
+}
+
+function onRecordKey(e: KeyboardEvent) {
+  if (!recording.value) return
+  e.preventDefault()
+  if (e.key === 'Escape') {
+    recording.value = false
+    return
+  }
+  const accel = prettyHotkey(e)
+  if (!accel) return
+  recording.value = false
+  applyHotkey(accel)
+}
+
+async function applyHotkey(accel: string) {
+  hotkeyInput.value = accel
+  try {
+    await api.setHotkey(accel)
+    settings.value.hotkey_toggle = accel
+    await saveSettings()
+    hotkeyState.value = { ok: true, message: `全局热键已注册：${accel}` }
+    toast(`全局热键已设为 ${accel}`, 'success')
+  } catch (e) {
+    // 注册失败（多半被别的软件占用）必须明确告知，否则用户无从排查
+    hotkeyState.value = { ok: false, message: String(e) }
+    err(e)
+  }
+}
+
+async function toggleAutostart(v: boolean) {
+  try {
+    await api.setAutostart(v)
+    autostart.value = v
+    toast(v ? '已设为开机自启' : '已取消开机自启', 'success')
+  } catch (e) {
+    // 失败时把开关弹回去，别让界面显示的状态和系统实际不符
+    autostart.value = !v
+    err(e)
+  }
+}
+
+onMounted(async () => {
+  hotkeyInput.value = settings.value.hotkey_toggle
+  try {
+    autostart.value = await api.getAutostart()
+  } catch {
+    autostart.value = false
+  }
+  // 启动时后端推的事件早于本组件挂载，必然收不到，所以主动查一次真实状态
+  try {
+    const st = await api.hotkeyStatus()
+    hotkeyInput.value = st.accel
+    hotkeyState.value = st.accel
+      ? {
+          ok: st.registered,
+          message: st.registered
+            ? `全局热键已注册：${st.accel}`
+            : `全局热键未生效：${st.accel}（可能被其他软件占用）`
+        }
+      : { ok: true, message: '未启用全局热键' }
+  } catch {
+    /* 浏览器预览没有 IPC，忽略即可 */
+  }
+  // 之后的换绑结果走事件实时更新
+  listen<{ ok: boolean; message: string }>('hymt2:hotkey', (e) => {
+    hotkeyState.value = e.payload
+  })
+})
 
 async function test(b: Backend) {
   testing.value = b.id
@@ -54,7 +146,68 @@ async function removeBackend(b: Backend) {
 </script>
 
 <template>
-  <div class="settings">
+  <div class="settings" :class="{ 'settings--recording': recording }" @keydown="onRecordKey">
+    <!-- 托盘与全局热键 -->
+    <section class="card tray-card">
+      <h3 class="card__title">窗口唤起与系统集成</h3>
+
+      <label class="row">
+        <span class="row__label">
+          关闭时最小化到托盘
+          <em class="row__hint">关窗后进程仍在，全局热键才会继续有效；从托盘菜单「退出」才真正结束</em>
+        </span>
+        <input
+          v-model="settings.close_to_tray"
+          class="switch"
+          type="checkbox"
+          @change="saveSettings()"
+        />
+      </label>
+
+      <label class="row">
+        <span class="row__label">
+          开机自动启动
+          <em class="row__hint">注册到系统启动项，后台常驻以便随时唤起</em>
+        </span>
+        <input
+          class="switch"
+          type="checkbox"
+          :checked="autostart"
+          @change="toggleAutostart(($event.target as HTMLInputElement).checked)"
+        />
+      </label>
+
+      <div class="row">
+        <span class="row__label">
+          全局热键（显示/隐藏窗口）
+          <em class="row__hint">
+            {{ recording ? '按下想要的组合键，Esc 取消' : '点击「录制」后按下组合键' }}
+          </em>
+        </span>
+        <div class="hotkey">
+          <input v-model="hotkeyInput" class="input input--sm hotkey__input" readonly />
+          <button class="btn btn--sm" @click="recording = !recording">
+            {{ recording ? '取消' : '录制' }}
+          </button>
+          <button class="btn btn--sm" @click="applyHotkey(hotkeyInput.trim())">应用</button>
+          <button
+            class="btn btn--sm"
+            title="取消全局热键"
+            @click="applyHotkey('')"
+          >
+            清除
+          </button>
+        </div>
+      </div>
+
+      <p v-if="hotkeyState" class="hotkey__state" :class="hotkeyState.ok ? 'ok' : 'bad'">
+        {{ hotkeyState.ok ? '✓' : '✗' }} {{ hotkeyState.message }}
+      </p>
+      <p class="tray-card__note">
+        托盘图标：左键单击直接唤出窗口，右键菜单提供「显示窗口 / 退出」。
+      </p>
+    </section>
+
     <div class="settings__head">
       <h2>后端配置</h2>
       <div class="settings__global">
@@ -126,6 +279,85 @@ async function removeBackend(b: Backend) {
 </template>
 
 <style scoped>
+
+/* ---------- 托盘 / 热键 / 自启 ---------- */
+
+.tray-card {
+  margin-bottom: var(--sp-5);
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  padding: var(--sp-3) 0;
+  border-bottom: 1px solid var(--c-border-soft);
+}
+
+.row:last-of-type {
+  border-bottom: none;
+}
+
+.row__label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 14px;
+  color: var(--c-text);
+}
+
+.row__hint {
+  font-size: 12px;
+  font-style: normal;
+  color: var(--c-text-tertiary);
+}
+
+.switch {
+  width: 38px;
+  height: 20px;
+  flex-shrink: 0;
+  cursor: pointer;
+  accent-color: var(--c-primary);
+}
+
+.hotkey {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-shrink: 0;
+}
+
+.hotkey__input {
+  width: 150px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  text-align: center;
+}
+
+.hotkey__state {
+  margin: var(--sp-3) 0 0;
+  font-size: 12px;
+}
+
+.hotkey__state.ok {
+  color: var(--c-success);
+}
+
+.hotkey__state.bad {
+  color: var(--c-danger);
+}
+
+.tray-card__note {
+  margin: var(--sp-3) 0 0;
+  font-size: 12px;
+  color: var(--c-text-tertiary);
+}
+
+/* 录制热键时吃掉输入框焦点，避免按键被输入框消费 */
+.settings--recording {
+  user-select: none;
+}
 .settings {
   max-width: 860px;
   padding: var(--sp-4) var(--sp-5);

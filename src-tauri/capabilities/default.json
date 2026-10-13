@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "应用默认权限：核心命令 + 文件对话框 + 前端事件订阅 + 自绘标题栏的窗口控制",
+  "description": "应用默认权限：核心命令 + 文件对话框 + 前端事件订阅 + 自绘标题栏的窗口控制 + 全局热键与开机自启",
   "windows": ["main"],
   "permissions": [
     "core:default",
@@ -13,6 +13,12 @@
     "core:window:allow-toggle-maximize",
     "core:window:allow-close",
     "core:window:allow-is-maximized",
-    "core:window:allow-start-dragging"
+    "core:window:allow-start-dragging",
+    "core:window:allow-hide",
+    "core:window:allow-show",
+    "core:window:allow-unminimize",
+    "core:window:allow-set-focus",
+    "global-shortcut:default",
+    "autostart:default"
   ]
 }
