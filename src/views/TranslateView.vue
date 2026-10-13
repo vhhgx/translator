@@ -4,9 +4,7 @@ import { listen } from '@tauri-apps/api/event'
 import LangSelect from '../components/LangSelect.vue'
 import { api, err, toast } from '../api'
 import { glossary, meta } from '../composables/useAppState'
-import type { HistoryItem, Mode, TermPair } from '../types'
-
-const emit = defineEmits<{ (e: 'view-all-history'): void }>()
+import type { Mode, TermPair } from '../types'
 
 // ---------- state ----------
 const source = ref('')
@@ -28,6 +26,8 @@ const currentJob = ref('')
 const failed = ref('')
 const inputEl = ref<HTMLTextAreaElement | null>(null)
 const autoTranslate = ref(true)
+/** 当前译文是否已收藏，持久化在 localStorage */
+const starred = ref(false)
 
 // 设计图常用语言快捷药丸（用户可一键切换，也可点下拉选全部 38 种）
 const quickSourceLangs = [
@@ -44,12 +44,6 @@ const quickTargetLangs = [
   { code: 'ko', name: '韩语' }
 ]
 
-// 历史流 state
-const historyTab = ref<'history' | 'saved'>('history')
-const historyItems = ref<HistoryItem[]>([])
-const savedIds = ref<Set<string>>(new Set())
-const hideHistory = ref(false)
-
 /** 最近一次完成翻译的原文，用来识别「只是改了内容」还是「原样重跑」。 */
 let lastTranslated = ''
 let debounceTimer: number | undefined
@@ -62,18 +56,35 @@ const styleOptions = computed(() => meta.value.styles)
 const formatOptions = computed(() => meta.value.format_types)
 const allLangs = computed<[string, string][]>(() => meta.value.languages)
 
-// 当前显示的历史卡片列表
-const displayedHistory = computed(() => {
-  if (historyTab.value === 'saved') {
-    return historyItems.value.filter((i) => savedIds.value.has(i.id))
-  }
-  return historyItems.value.slice(0, 5) // 主页瀑布流展示前 5 条 + 1 个 Show all
-})
+/** 收藏以「原文+译文」为键，换一段文本就是另一条收藏。 */
+const starKey = computed(() => `${source.value}\u0000${result.value}`)
 
-onMounted(async () => {
+function syncStar() {
+  try {
+    const raw = localStorage.getItem('hymt2:starred')
+    starred.value = raw ? (JSON.parse(raw) as string[]).includes(starKey.value) : false
+  } catch {
+    starred.value = false
+  }
+}
+
+function toggleStar() {
+  let list: string[] = []
+  try {
+    list = JSON.parse(localStorage.getItem('hymt2:starred') ?? '[]')
+  } catch {}
+  if (starred.value) {
+    list = list.filter((k) => k !== starKey.value)
+  } else {
+    list.push(starKey.value)
+  }
+  localStorage.setItem('hymt2:starred', JSON.stringify(list))
+  starred.value = !starred.value
+  toast(starred.value ? '已收藏这条译文' : '已取消收藏', 'success')
+}
+
+onMounted(() => {
   loadGlossaryTerms()
-  await loadRecentHistory()
-  loadSavedIds()
 
   window.addEventListener('hymt2:reuse', onReuse)
   const pending = localStorage.getItem('hymt2:reuse')
@@ -83,27 +94,7 @@ onMounted(async () => {
   }
 })
 
-function loadSavedIds() {
-  try {
-    const raw = localStorage.getItem('hymt2:saved_history_ids')
-    if (raw) savedIds.value = new Set(JSON.parse(raw))
-  } catch {}
-}
-
-function toggleStar(id: string) {
-  if (savedIds.value.has(id)) {
-    savedIds.value.delete(id)
-  } else {
-    savedIds.value.add(id)
-  }
-  localStorage.setItem('hymt2:saved_history_ids', JSON.stringify([...savedIds.value]))
-}
-
-async function loadRecentHistory() {
-  try {
-    historyItems.value = await api.historyList(undefined, 20)
-  } catch {}
-}
+watch(starKey, syncStar)
 
 function onReuse(e: Event) {
   const item = (e as CustomEvent).detail
@@ -112,15 +103,6 @@ function onReuse(e: Event) {
   targetLang.value = item.target_lang
   mode.value = item.mode as Mode
   lastTranslated = item.source
-}
-
-function applyHistoryCard(item: HistoryItem) {
-  source.value = item.source
-  result.value = item.translation
-  targetLang.value = item.target_lang
-  lastTranslated = item.source
-  inputEl.value?.focus()
-  toast('已恢复历史记录到翻译区', 'info')
 }
 
 // ---------- glossary ----------
@@ -205,7 +187,6 @@ async function run() {
           usedTerms.value = e.payload.used_terms ?? []
           lastTranslated = source.value
           busy.value = false
-          loadRecentHistory() // 翻译完成刷新下方历史卡片流
         }
       )
     )
@@ -415,12 +396,13 @@ async function showPrompt() {
             <LangSelect v-model="targetLang" :options="allLangs" align="right" />
           </div>
 
-          <!-- 右上角收藏星标（对齐设计图） -->
+          <!-- 右上角收藏星标 -->
           <button
             class="star-btn"
-            title="收藏本条翻译"
-            :class="{ 'star-btn--on': currentJob && savedIds.has(currentJob) }"
-            @click="currentJob && toggleStar(currentJob)"
+            :class="{ 'star-btn--on': starred }"
+            :disabled="!result"
+            :title="starred ? '取消收藏' : '收藏本条翻译'"
+            @click="toggleStar"
           >
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
@@ -518,88 +500,6 @@ async function showPrompt() {
         </div>
       </div>
     </transition>
-
-    <!-- 底部区域：对齐设计图下半部分的 History & Saved 瀑布卡片流 -->
-    <section class="history-stream">
-      <header class="history-stream__header">
-        <div class="stream-tabs">
-          <button
-            class="stream-tab"
-            :class="{ 'stream-tab--active': historyTab === 'history' }"
-            @click="historyTab = 'history'"
-          >
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <circle cx="12" cy="12" r="10" />
-              <polyline points="12 6 12 12 16 14" />
-            </svg>
-            <span>History</span>
-          </button>
-          <button
-            class="stream-tab"
-            :class="{ 'stream-tab--active': historyTab === 'saved' }"
-            @click="historyTab = 'saved'"
-          >
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
-            </svg>
-            <span>Saved ({{ savedIds.size }})</span>
-          </button>
-        </div>
-
-        <div class="stream-actions">
-          <button class="text-action-btn" @click="hideHistory = !hideHistory">
-            {{ hideHistory ? 'Show' : 'Hide' }}
-          </button>
-          <button class="footer-icon-btn" title="查看完整历史页面" @click="emit('view-all-history')">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-              <circle cx="12" cy="5" r="2" />
-              <circle cx="12" cy="12" r="2" />
-              <circle cx="12" cy="19" r="2" />
-            </svg>
-          </button>
-        </div>
-      </header>
-
-      <!-- 历史卡片网格列表 -->
-      <div v-if="!hideHistory" class="history-grid">
-        <article
-          v-for="item in displayedHistory"
-          :key="item.id"
-          class="hist-card"
-          @click="applyHistoryCard(item)"
-        >
-          <div class="hist-card__head">
-            <span class="lang-tag">
-              {{ item.source_lang === 'auto' ? '自动' : item.source_lang }} › {{ item.target_lang }}
-            </span>
-            <span class="grow" />
-            <button
-              class="card-star"
-              :class="{ 'card-star--on': savedIds.has(item.id) }"
-              title="收藏"
-              @click.stop="toggleStar(item.id)"
-            >
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
-              </svg>
-            </button>
-          </div>
-
-          <p class="hist-card__src">{{ item.source }}</p>
-          <p class="hist-card__trans">{{ item.translation }}</p>
-        </article>
-
-        <!-- "Show all >" 入口卡片（对齐设计图右下角） -->
-        <article class="hist-card hist-card--showall" @click="emit('view-all-history')">
-          <div class="showall-inner">
-            <span>Show all</span>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <polyline points="9 18 15 12 9 6" />
-            </svg>
-          </div>
-        </article>
-      </div>
-    </section>
   </div>
 </template>
 
@@ -608,20 +508,19 @@ async function showPrompt() {
   display: flex;
   flex-direction: column;
   height: 100%;
-  padding: 20px 28px 24px;
-  overflow-y: auto;
+  padding: 20px 24px;
   box-sizing: border-box;
   background: var(--c-bg);
 }
 
-/* 核心工作区：双卡片 + 中央悬浮交换钮 */
+/* 核心工作区：占满除边距外的全部高度，双卡片各自撑满 */
 .workspace {
   position: relative;
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 16px;
-  min-height: 380px;
-  flex-shrink: 0;
+  flex: 1;
+  min-height: 0;
 }
 
 .card-pane {
@@ -630,25 +529,20 @@ async function showPrompt() {
   border-radius: var(--r-xl);
   overflow: hidden;
   box-sizing: border-box;
-  transition: all 0.2s ease;
 }
 
-/* 左侧输入卡片：白底，细微柔和边框，柔和微阴影 */
+/* 左侧输入卡片：纯白底，靠底色与右侧淡蓝卡区分，不加边框与阴影 */
 .card-pane--in {
   background: var(--c-surface);
-  border: 1px solid var(--c-border);
-  box-shadow: 0 2px 12px rgba(60, 64, 67, 0.04);
+  border: none;
+  box-shadow: none;
 }
 
-.card-pane--in:focus-within {
-  border-color: #b0c9f0;
-  box-shadow: 0 4px 16px rgba(26, 115, 232, 0.08);
-}
-
-/* 右侧输出卡片：极雅致浅淡蓝灰底色，与左侧对比明快 */
+/* 右侧输出卡片：纯淡蓝底色，不要边框与阴影 */
 .card-pane--out {
   background: var(--c-pane-out-bg);
-  border: 1px solid #e1e7f0;
+  border: none;
+  box-shadow: none;
 }
 
 /* 卡片顶部语言药丸栏 */
@@ -724,7 +618,7 @@ async function showPrompt() {
   position: relative;
   display: flex;
   flex: 1;
-  min-height: 240px;
+  min-height: 0;
   padding: 20px 24px;
   overflow-y: auto;
 }
@@ -1002,197 +896,6 @@ async function showPrompt() {
   display: flex;
   gap: 16px;
   font-size: 13px;
-}
-
-/* 底部区域：对齐设计图下半部分的 History & Saved 瀑布卡片流 */
-.history-stream {
-  margin-top: 28px;
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
-.history-stream__header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  border-bottom: 1px solid var(--c-border-soft);
-  padding-bottom: 10px;
-}
-
-.stream-tabs {
-  display: flex;
-  align-items: center;
-  gap: 20px;
-}
-
-.stream-tab {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 4px;
-  font-family: inherit;
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--c-text-secondary);
-  background: none;
-  border: none;
-  cursor: pointer;
-  position: relative;
-  transition: color 0.15s;
-}
-
-.stream-tab:hover {
-  color: var(--c-text);
-}
-
-.stream-tab--active {
-  color: var(--c-primary);
-  font-weight: 600;
-}
-
-.stream-tab--active::after {
-  content: '';
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: -11px;
-  height: 3px;
-  background: var(--c-primary);
-  border-radius: 3px 3px 0 0;
-}
-
-.stream-actions {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.text-action-btn {
-  font-family: inherit;
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--c-text-secondary);
-  background: none;
-  border: none;
-  cursor: pointer;
-}
-
-.text-action-btn:hover {
-  color: var(--c-text);
-}
-
-/* 瀑布卡片网格布局（对齐设计图 3 列多行） */
-.history-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-  gap: 16px;
-}
-
-.hist-card {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 16px;
-  background: var(--c-surface);
-  border: 1px solid var(--c-border-soft);
-  border-radius: var(--r-lg);
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.hist-card:hover {
-  border-color: #c2d7fa;
-  box-shadow: 0 4px 14px rgba(60, 64, 67, 0.06);
-  transform: translateY(-2px);
-}
-
-.hist-card__head {
-  display: flex;
-  align-items: center;
-}
-
-.lang-tag {
-  display: inline-flex;
-  align-items: center;
-  padding: 4px 10px;
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--c-pill-text);
-  background: var(--c-pill-bg);
-  border-radius: var(--r-pill);
-}
-
-.card-star {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  background: none;
-  border: none;
-  border-radius: 50%;
-  color: var(--c-text-tertiary);
-  cursor: pointer;
-  transition: all 0.15s;
-}
-
-.card-star:hover {
-  background: rgba(0, 0, 0, 0.05);
-  color: var(--c-text);
-}
-
-.card-star--on {
-  color: #fbbc04;
-}
-
-.card-star--on svg {
-  fill: #fbbc04;
-}
-
-.hist-card__src {
-  margin: 0;
-  font-size: 14px;
-  color: var(--c-text);
-  line-height: 1.5;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-
-.hist-card__trans {
-  margin: 0;
-  font-size: 13px;
-  color: var(--c-text-secondary);
-  line-height: 1.5;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-
-/* "Show all >" 卡片样式 */
-.hist-card--showall {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--c-surface-alt);
-  border: 1px dashed var(--c-border);
-}
-
-.hist-card--showall:hover {
-  background: var(--c-primary-soft);
-  border-color: var(--c-primary);
-}
-
-.showall-inner {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--c-primary);
 }
 
 .grow {
