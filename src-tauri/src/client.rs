@@ -71,6 +71,22 @@ fn health_url(base_url: &str) -> String {
     format!("{}/health", api_root(base_url))
 }
 
+/// llama-server 的上下文窗口。
+const CONTEXT_TOKENS: usize = 8192;
+/// 留给服务端自身开销的余量。
+const CONTEXT_SAFETY: usize = 128;
+
+/// 按输入长度分配输出预算。
+///
+/// `max_tokens` 不能直接填满上下文窗口：服务端是按「输入 + 输出」一起算
+/// 预算的，填满 8192 时哪怕输入只有 33 tokens 也会溢出并返回 400。
+/// 中文按 1 字≈1 token 估算（宁可低估输出也别高估预算）。
+fn completion_budget(prompt: &str) -> u32 {
+    let estimated_input = prompt.chars().count() + 32 + CONTEXT_SAFETY;
+    let remaining = CONTEXT_TOKENS.saturating_sub(estimated_input);
+    remaining.clamp(256, CONTEXT_TOKENS / 2) as u32
+}
+
 pub async fn check_health(backend: &Backend) -> Result<Vec<String>, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
@@ -189,7 +205,7 @@ pub async fn translate_stream(
         "model": backend.model,
         "messages": [{ "role": "user", "content": prompt_text }],
         "temperature": temperature,
-        "max_tokens": 8192,
+        "max_tokens": completion_budget(&prompt_text),
         "stream": true,
     });
 
@@ -280,7 +296,7 @@ pub async fn translate(
         "model": backend.model,
         "messages": [{ "role": "user", "content": prompt_text }],
         "temperature": temperature,
-        "max_tokens": 8192,
+        "max_tokens": completion_budget(&prompt_text),
         "stream": false,
     });
 
@@ -401,6 +417,23 @@ mod tests {
             health_url("http://127.0.0.1:8080/v1/chat/completions"),
             "http://127.0.0.1:8080/health"
         );
+    }
+
+    /// 输入 + 输出必须一起塞进上下文窗口，max_tokens 填满窗口必然 400。
+    #[test]
+    fn completion_budget_fits_within_context() {
+        // 短句：输出最多只能占窗口的一半
+        let short = completion_budget("你好");
+        assert!(short <= (CONTEXT_TOKENS / 2) as u32, "{short}");
+
+        // 长文：预算随输入收缩，且总账仍留在窗口内
+        let long_prompt = "翻".repeat(5000);
+        let long = completion_budget(&long_prompt);
+        let total = long_prompt.chars().count() + long as usize;
+        assert!(total < CONTEXT_TOKENS, "输入 {} + 输出 {long} 超出窗口", long_prompt.chars().count());
+
+        // 即便输入几乎占满窗口，也要返回一个非零值而不是下溢
+        assert!(completion_budget(&"x".repeat(CONTEXT_TOKENS * 2)) > 0);
     }
 
     #[test]

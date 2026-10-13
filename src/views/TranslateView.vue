@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { listen } from '@tauri-apps/api/event'
 import LangSelect from '../components/LangSelect.vue'
+import BackendPicker from '../components/BackendPicker.vue'
 import { api, err, toast } from '../api'
 import { glossary, meta } from '../composables/useAppState'
 import type { Mode, TermPair } from '../types'
@@ -29,7 +30,6 @@ const showAdvanced = ref(false)
 const currentJob = ref('')
 const failed = ref('')
 const inputEl = ref<HTMLTextAreaElement | null>(null)
-const autoTranslate = ref(true)
 /** 当前译文是否已收藏，持久化在 localStorage */
 const starred = ref(false)
 
@@ -242,9 +242,8 @@ function scheduleAuto() {
   }, 1000)
 }
 
-watch(source, () => {
-  if (autoTranslate.value) scheduleAuto()
-})
+// 自动翻译是默认且唯一的行为，不再提供开关
+watch(source, scheduleAuto)
 
 watch(busy, (isBusy) => {
   if (isBusy || !autoPending) return
@@ -283,16 +282,6 @@ function swap() {
 async function copy(text: string) {
   await navigator.clipboard.writeText(text)
   toast('已复制到剪贴板', 'success')
-}
-
-async function showPrompt() {
-  try {
-    const p = await api.previewPrompt(buildRequest())
-    console.log(p)
-    toast('提示词已输出到控制台', 'success')
-  } catch (e) {
-    err(e)
-  }
 }
 </script>
 
@@ -346,14 +335,7 @@ async function showPrompt() {
         <!-- 左卡片底栏 -->
         <footer class="card-pane__footer">
           <div class="footer-left">
-            <!-- 语音/查看提示词图标（对齐设计图左下角微标） -->
-            <button class="footer-icon-btn" title="查看发送的完整模型提示词" @click="showPrompt">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
-                <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
-                <line x1="12" y1="19" x2="12" y2="22" />
-              </svg>
-            </button>
+            <BackendPicker />
             <button class="footer-icon-btn" title="提示词参数配置" @click="showAdvanced = !showAdvanced">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <circle cx="12" cy="12" r="3" />
@@ -363,23 +345,8 @@ async function showPrompt() {
           </div>
 
           <div class="footer-right">
+            <span v-if="busy" class="spinner" />
             <span class="char-count">{{ source.length }} / 5000</span>
-            <label class="auto-switch" title="停止输入 1 秒后自动执行翻译">
-              <input v-model="autoTranslate" type="checkbox" />
-              <span class="auto-switch__label">自动翻译</span>
-            </label>
-            <button
-              class="primary-go-btn"
-              :disabled="busy || !source.trim()"
-              title="立即执行翻译 (Ctrl+Enter)"
-              @click="run"
-            >
-              <span v-if="busy" class="spinner" />
-              <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-                <line x1="5" y1="12" x2="19" y2="12" />
-                <polyline points="12 5 19 12 12 19" />
-              </svg>
-            </button>
           </div>
         </footer>
       </section>
@@ -535,12 +502,12 @@ async function showPrompt() {
   background: var(--c-bg);
 }
 
-/* 核心工作区：占满除边距外的全部高度，双卡片各自撑满 */
+/* 核心工作区：两张卡片无缝相邻，通栏铺满 */
 .workspace {
   position: relative;
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 16px;
+  gap: 0;
   flex: 1;
   min-height: 0;
 }
@@ -560,10 +527,11 @@ async function showPrompt() {
   box-shadow: none;
 }
 
-/* 右侧输出卡片：纯淡蓝底色，不要边框与阴影 */
+/* 右侧输出卡片：纯淡蓝底色，不要边框、阴影与圆角 */
 .card-pane--out {
   background: var(--c-pane-out-bg);
   border: none;
+  border-radius: 0;
   box-shadow: none;
 }
 
@@ -771,51 +739,12 @@ async function showPrompt() {
   color: var(--c-text-tertiary);
 }
 
-.auto-switch {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 13px;
-  color: var(--c-text-secondary);
-  cursor: pointer;
-  user-select: none;
-}
-
-.auto-switch input {
-  cursor: pointer;
-}
-
-.primary-go-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 38px;
-  height: 38px;
-  background: var(--c-primary);
-  color: #fff;
-  border: none;
-  border-radius: 50%;
-  cursor: pointer;
-  box-shadow: 0 2px 6px rgba(26, 115, 232, 0.3);
-  transition: all 0.15s;
-}
-
-.primary-go-btn:hover:not(:disabled) {
-  background: var(--c-primary-hover);
-  transform: scale(1.05);
-}
-
-.primary-go-btn:disabled {
-  background: #dadce0;
-  box-shadow: none;
-  cursor: not-allowed;
-}
-
+/* 翻译中的轻量指示（原先挂在发送按钮上，按钮移除后留在底栏） */
 .spinner {
-  width: 16px;
-  height: 16px;
-  border: 2px solid rgba(255, 255, 255, 0.4);
-  border-top-color: #fff;
+  width: 13px;
+  height: 13px;
+  border: 2px solid var(--c-border);
+  border-top-color: var(--c-primary);
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
 }

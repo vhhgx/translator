@@ -2,7 +2,7 @@
 import { onMounted, onUnmounted, ref } from 'vue'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { toasts } from './api'
-import { activeBackend, pickBackend, reloadAll, settings } from './composables/useAppState'
+import { reloadAll } from './composables/useAppState'
 import BatchView from './views/BatchView.vue'
 import DocumentView from './views/DocumentView.vue'
 import GlossaryView from './views/GlossaryView.vue'
@@ -15,7 +15,6 @@ type Tab = 'translate' | 'glossary' | 'history' | 'batch' | 'doc' | 'settings'
 
 const tab = ref<Tab>('translate')
 const menuOpen = ref(false)
-const backendMenuOpen = ref(false)
 
 const NAV_ITEMS: { key: Tab; label: string; icon: string }[] = [
   { key: 'translate', label: '翻译', icon: '文A' },
@@ -28,32 +27,12 @@ const NAV_ITEMS: { key: Tab; label: string; icon: string }[] = [
 
 onMounted(reloadAll)
 
-onMounted(() => {
-  document.addEventListener('click', onDocClick)
-  document.addEventListener('keydown', onKey)
-})
-
-onUnmounted(() => {
-  document.removeEventListener('click', onDocClick)
-  document.removeEventListener('keydown', onKey)
-})
-
-function onDocClick(e: MouseEvent) {
-  const el = e.target as HTMLElement
-  if (backendMenuOpen.value && !el.closest('.backend-pick')) {
-    backendMenuOpen.value = false
-  }
-}
-
 function onKey(e: KeyboardEvent) {
-  if (e.key === 'Escape') backendMenuOpen.value = false
+  if (e.key === 'Escape') menuOpen.value = false
 }
 
-async function chooseBackend(id: string) {
-  backendMenuOpen.value = false
-  if (id === settings.value.active_id) return
-  await pickBackend(id)
-}
+onMounted(() => document.addEventListener('keydown', onKey))
+onUnmounted(() => document.removeEventListener('keydown', onKey))
 
 // ---------- 自绘窗口控制（decorations: false 后系统标题栏已移除） ----------
 const maximized = ref(false)
@@ -132,19 +111,18 @@ function reuse(item: HistoryItem) {
               <path d="M3 6h18M3 12h18M3 18h18" />
             </svg>
           </button>
-        </div>
 
-        <!-- 顶栏快捷模式胶囊（对齐设计图：文A SMS、Document、Website） -->
-        <div class="topbar__center">
-          <button
-            class="top-pill"
-            :class="{ 'top-pill--active': tab === 'translate' }"
-            @click="go('translate')"
-          >
-            <span class="top-pill__icon">文A</span>
-            <span>文本</span>
-          </button>
-          <button
+          <!-- 模式胶囊紧挨汉堡菜单排列 -->
+          <div class="topbar__center">
+            <button
+              class="top-pill"
+              :class="{ 'top-pill--active': tab === 'translate' }"
+              @click="go('translate')"
+            >
+              <span class="top-pill__icon">文A</span>
+              <span>文本</span>
+            </button>
+            <button
             class="top-pill"
             :class="{ 'top-pill--active': tab === 'doc' }"
             @click="go('doc')"
@@ -170,50 +148,6 @@ function reuse(item: HistoryItem) {
             </svg>
             <span>Website / 批量</span>
           </button>
-        </div>
-
-        <div class="topbar__right">
-          <!-- 当前模型下拉选择：直接切换后端，不再跳转到设置页 -->
-          <div class="backend-pick">
-            <button
-              class="backend-tag"
-              title="切换翻译模型"
-              @click.stop="backendMenuOpen = !backendMenuOpen"
-            >
-              <span class="backend-tag__dot" />
-              {{ activeBackend?.name ?? '选择模型' }}
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-                <path d="M6 9l6 6 6-6" />
-              </svg>
-            </button>
-
-            <div v-if="backendMenuOpen" class="backend-menu">
-              <button
-                v-for="b in settings.backends"
-                :key="b.id"
-                class="backend-menu__item"
-                :class="{ 'backend-menu__item--on': b.id === settings.active_id }"
-                @click="chooseBackend(b.id)"
-              >
-                <span class="backend-tag__dot" />
-                <span class="backend-menu__name">{{ b.name }}</span>
-                <span v-if="b.model" class="backend-menu__model">{{ b.model }}</span>
-                <svg
-                  v-if="b.id === settings.active_id"
-                  width="14"
-                  height="14"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2.5"
-                >
-                  <polyline points="20 6 9 17 4 12" />
-                </svg>
-              </button>
-              <button class="backend-menu__manage" @click="go('settings')">
-                管理模型与 API Key
-              </button>
-            </div>
           </div>
         </div>
 
@@ -294,11 +228,10 @@ function reuse(item: HistoryItem) {
   position: relative;
 }
 
-/* 顶栏兼标题栏，右侧留出窗口按钮的位置 */
+/* 顶栏兼标题栏：左侧菜单+模式胶囊，右侧窗口按钮，中间留空当拖拽区 */
 .topbar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   height: 60px;
   padding: 0 0 0 12px;
   background: var(--c-surface);
@@ -310,6 +243,8 @@ function reuse(item: HistoryItem) {
   display: flex;
   align-items: center;
   gap: 16px;
+  flex: 1;
+  min-width: 0;
 }
 
 .icon-btn {
@@ -369,119 +304,6 @@ function reuse(item: HistoryItem) {
   font-size: 13px;
 }
 
-.topbar__right {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.backend-pick {
-  position: relative;
-}
-
-.backend-tag {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 14px;
-  font-family: inherit;
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--c-text-secondary);
-  background: var(--c-surface-alt);
-  border: 1px solid var(--c-border-soft);
-  border-radius: var(--r-pill);
-  cursor: pointer;
-  transition: all 0.15s;
-}
-
-.backend-tag:hover {
-  background: var(--c-surface-hover);
-  color: var(--c-primary);
-  border-color: var(--c-primary);
-}
-
-.backend-tag__dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: #34a853;
-  flex-shrink: 0;
-}
-
-.backend-menu {
-  position: absolute;
-  top: calc(100% + 8px);
-  right: 0;
-  z-index: 60;
-  min-width: 260px;
-  padding: 8px;
-  background: var(--c-surface);
-  border: 1px solid var(--c-border-soft);
-  border-radius: var(--r-lg);
-  box-shadow: var(--shadow-float);
-}
-
-.backend-menu__item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 9px 10px;
-  font-family: inherit;
-  font-size: 13px;
-  color: var(--c-text);
-  background: none;
-  border: none;
-  border-radius: var(--r-md);
-  cursor: pointer;
-  text-align: left;
-}
-
-.backend-menu__item:hover {
-  background: var(--c-surface-hover);
-}
-
-.backend-menu__item--on {
-  color: var(--c-primary);
-  font-weight: 600;
-  background: var(--c-primary-soft);
-}
-
-.backend-menu__name {
-  flex: 1;
-  white-space: nowrap;
-}
-
-.backend-menu__model {
-  font-size: 11px;
-  color: var(--c-text-tertiary);
-  max-width: 130px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.backend-menu__manage {
-  width: 100%;
-  margin-top: 4px;
-  padding: 9px 10px;
-  font-family: inherit;
-  font-size: 12px;
-  color: var(--c-text-secondary);
-  background: none;
-  border: none;
-  border-top: 1px solid var(--c-border-soft);
-  border-radius: 0 0 var(--r-md) var(--r-md);
-  cursor: pointer;
-  text-align: left;
-}
-
-.backend-menu__manage:hover {
-  color: var(--c-primary);
-}
-
-/* 自绘窗口按钮：对齐 Windows 原生尺寸，关闭悬停转红 */
 .wincontrols {
   display: flex;
   align-items: stretch;
