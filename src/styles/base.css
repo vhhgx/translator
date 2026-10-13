@@ -1,0 +1,352 @@
+/* Hy-MT2 翻译工具 — 设计 token 与基础样式
+ * 纯手写 CSS，不依赖任何 UI 框架。
+ */
+
+:root {
+  /* 色彩：克制的浅色主题，参考 Google Translate 的观感 */
+  --c-bg: #ffffff;
+  --c-surface: #ffffff;
+  --c-surface-alt: #f8f9fa;
+  --c-surface-hover: #f1f3f4;
+  --c-border: #dadce0;
+  --c-border-soft: #e8eaed;
+  --c-text: #202124;
+  --c-text-secondary: #5f6368;
+  --c-text-tertiary: #80868b;
+  --c-primary: #1a73e8;
+  --c-primary-hover: #1765cc;
+  --c-primary-soft: #e8f0fe;
+  --c-danger: #d93025;
+  --c-success: #188038;
+  --c-warning: #e37400;
+
+  /* 圆角与阴影 */
+  --r-sm: 4px;
+  --r-md: 8px;
+  --r-lg: 12px;
+  --r-full: 999px;
+  --shadow-sm: 0 1px 2px rgba(60, 64, 67, 0.1);
+  --shadow-md: 0 2px 6px rgba(60, 64, 67, 0.15);
+  --shadow-lg: 0 4px 16px rgba(60, 64, 67, 0.2);
+
+  /* 间距 */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+
+  /* 字体 */
+  --font-ui: 'Microsoft YaHei UI', 'PingFang SC', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'Cascadia Code', Consolas, 'SF Mono', monospace;
+
+  --sidebar-w: 64px;
+  --header-h: 56px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: var(--font-ui);
+  font-size: 14px;
+  color: var(--c-text);
+  background: var(--c-bg);
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+/* ---------- 通用控件 ---------- */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 16px;
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.2;
+  color: var(--c-text);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-full);
+  cursor: pointer;
+  transition:
+    background 0.15s,
+    border-color 0.15s,
+    box-shadow 0.15s,
+    color 0.15s;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--c-surface-hover);
+}
+
+.btn:active:not(:disabled) {
+  background: var(--c-border-soft);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn:focus-visible {
+  outline: 2px solid var(--c-primary);
+  outline-offset: 2px;
+}
+
+.btn--primary {
+  color: #fff;
+  background: var(--c-primary);
+  border-color: var(--c-primary);
+}
+
+.btn--primary:hover:not(:disabled) {
+  background: var(--c-primary-hover);
+  border-color: var(--c-primary-hover);
+}
+
+.btn--ghost {
+  border-color: transparent;
+  background: transparent;
+}
+
+.btn--ghost:hover:not(:disabled) {
+  background: var(--c-surface-hover);
+}
+
+.btn--danger {
+  color: var(--c-danger);
+}
+
+.btn--danger:hover:not(:disabled) {
+  background: #fce8e6;
+}
+
+.btn--sm {
+  padding: 5px 12px;
+  font-size: 13px;
+}
+
+.btn--icon {
+  padding: 6px;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--r-full);
+}
+
+/* 输入 */
+
+.input,
+.select {
+  width: 100%;
+  padding: 8px 12px;
+  font-family: inherit;
+  font-size: 14px;
+  color: var(--c-text);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  outline: none;
+  transition:
+    border-color 0.15s,
+    box-shadow 0.15s;
+}
+
+.input:focus,
+.select:focus {
+  border-color: var(--c-primary);
+  box-shadow: 0 0 0 3px var(--c-primary-soft);
+}
+
+.select {
+  cursor: pointer;
+  appearance: none;
+  padding-right: 30px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%235f6368' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+}
+
+.label {
+  display: block;
+  margin-bottom: var(--sp-1);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--c-text-secondary);
+}
+
+.field {
+  margin-bottom: var(--sp-4);
+}
+
+/* 卡片 */
+
+.card {
+  background: var(--c-surface);
+  border: 1px solid var(--c-border-soft);
+  border-radius: var(--r-lg);
+  padding: var(--sp-4);
+}
+
+.card__title {
+  margin: 0 0 var(--sp-3);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--c-text);
+}
+
+/* 徽标 */
+
+.tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  font-size: 12px;
+  border-radius: var(--r-full);
+  background: var(--c-surface-hover);
+  color: var(--c-text-secondary);
+}
+
+.tag--primary {
+  background: var(--c-primary-soft);
+  color: var(--c-primary);
+}
+
+.tag--success {
+  background: #e6f4ea;
+  color: var(--c-success);
+}
+
+.tag--warning {
+  background: #fef7e0;
+  color: var(--c-warning);
+}
+
+/* 空状态 */
+
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  padding: var(--sp-6);
+  color: var(--c-text-tertiary);
+  text-align: center;
+}
+
+.empty__icon {
+  font-size: 32px;
+  opacity: 0.5;
+}
+
+/* 滚动条 */
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--c-border);
+  border-radius: var(--r-full);
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--c-text-tertiary);
+  background-clip: content-box;
+}
+
+/* 提示条 */
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 28px;
+  transform: translateX(-50%);
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  max-width: 520px;
+  padding: 10px 18px;
+  font-size: 13px;
+  color: #fff;
+  background: #3c4043;
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-lg);
+  animation: toast-in 0.2s ease;
+}
+
+.toast--error {
+  background: var(--c-danger);
+}
+
+.toast--success {
+  background: var(--c-success);
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 10px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+
+/* 表格 */
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.table th,
+.table td {
+  padding: 8px 10px;
+  text-align: left;
+  border-bottom: 1px solid var(--c-border-soft);
+}
+
+.table th {
+  font-weight: 600;
+  color: var(--c-text-secondary);
+  background: var(--c-surface-alt);
+}
+
+.table tbody tr:hover {
+  background: var(--c-surface-alt);
+}
+
+textarea.input {
+  resize: vertical;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.6;
+}

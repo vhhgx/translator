@@ -1,0 +1,45 @@
+[package]
+name = "hy-mt2-translator"
+version = "0.1.0"
+description = "Hy-MT2 跨端翻译工具"
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "hy_mt2_translator_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.13", default-features = false, features = [
+  "rustls",
+  "json",
+  "charset",
+] }
+tokio = { version = "1", features = ["full"] }
+keyring = { version = "3.6", features = ["windows-native", "sync-secret-service"] }
+encoding_rs = "0.8"
+rusqlite = { version = "0.32", features = ["bundled"] }
+thiserror = "2"
+uuid = { version = "1", features = ["v4"] }
+dirs = "5"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation"] }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true
