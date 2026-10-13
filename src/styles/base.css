@@ -3,36 +3,41 @@
  */
 
 :root {
-  /* 色彩：对齐 Google 翻译的观感 —— 大面积留白 + 淡蓝强调 + 药丸形状 */
+  /* 色彩：对齐设计图（Google Translate 新版风格）—— 浅灰蓝应用底色 + 纯白与浅蓝双卡片 + 药丸胶囊 */
+  --c-app-bg: #eef2f6;
   --c-bg: #ffffff;
   --c-surface: #ffffff;
-  --c-surface-alt: #f8f9fa;
-  --c-surface-hover: #f1f3f4;
-  --c-card: #eef1f5;
-  --c-border: #dadce0;
+  --c-surface-alt: #f1f4f9;
+  --c-pane-out-bg: #f0f4f9;
+  --c-surface-hover: #e8ecf2;
+  --c-card: #ffffff;
+  --c-border: #e1e4e8;
   --c-border-soft: #e8eaed;
   --c-divider: #e8eaed;
-  --c-text: #202124;
-  --c-text-secondary: #5f6368;
-  --c-text-tertiary: #80868b;
+  --c-text: #1f2328;
+  --c-text-secondary: #57606a;
+  --c-text-tertiary: #8c959f;
   --c-primary: #1a73e8;
-  --c-primary-hover: #1967d2;
+  --c-primary-hover: #1765cc;
   --c-primary-soft: #e8f0fe;
-  --c-pill-bg: #d2e3fc;
-  --c-pill-text: #185abc;
+  --c-pill-bg: #c2e7ff;
+  --c-pill-text: #001d35;
+  --c-pill-hover: #b3dcf7;
   --c-danger: #d93025;
   --c-success: #188038;
   --c-warning: #e37400;
 
-  /* 圆角与阴影：Google 用的是大圆角 + 极轻投影 */
-  --r-sm: 4px;
-  --r-md: 8px;
-  --r-lg: 12px;
-  --r-xl: 16px;
+  /* 圆角与阴影：大圆角悬浮卡片体系 */
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 16px;
+  --r-xl: 20px;
+  --r-container: 24px;
   --r-pill: 999px;
-  --shadow-sm: 0 1px 2px rgba(60, 64, 67, 0.08);
-  --shadow-md: 0 1px 3px rgba(60, 64, 67, 0.12);
-  --shadow-float: 0 2px 8px rgba(60, 64, 67, 0.16);
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.04);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.05);
+  --shadow-float: 0 4px 16px rgba(0, 0, 0, 0.08);
+  --shadow-card: 0 2px 12px rgba(0, 0, 0, 0.04);
 
   /* 间距 */
   --sp-1: 4px;
@@ -66,7 +71,7 @@ body {
   font-family: var(--font-ui);
   font-size: 14px;
   color: var(--c-text);
-  background: var(--c-bg);
+  background: var(--c-app-bg);
   -webkit-font-smoothing: antialiased;
   overflow: hidden;
 }

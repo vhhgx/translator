@@ -3,12 +3,15 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { listen } from '@tauri-apps/api/event'
 import LangSelect from '../components/LangSelect.vue'
 import { api, err, toast } from '../api'
-import { glossary, meta, pickBackend, settings } from '../composables/useAppState'
-import type { Mode, TermPair } from '../types'
+import { glossary, meta } from '../composables/useAppState'
+import type { HistoryItem, Mode, TermPair } from '../types'
+
+const emit = defineEmits<{ (e: 'view-all-history'): void }>()
 
 // ---------- state ----------
 const source = ref('')
 const result = ref('')
+const sourceLang = ref('auto')
 const targetLang = ref('英语')
 const mode = ref<Mode>('basic')
 const style = ref('日常口语化风格')
@@ -25,6 +28,28 @@ const currentJob = ref('')
 const failed = ref('')
 const inputEl = ref<HTMLTextAreaElement | null>(null)
 const autoTranslate = ref(true)
+
+// 设计图常用语言快捷药丸（用户可一键切换，也可点下拉选全部 38 种）
+const quickSourceLangs = [
+  { code: 'auto', name: '检测语言' },
+  { code: 'zh', name: '中文' },
+  { code: 'en', name: '英语' },
+  { code: 'ja', name: '日语' }
+]
+
+const quickTargetLangs = [
+  { code: 'en', name: '英语' },
+  { code: 'zh', name: '中文' },
+  { code: 'ja', name: '日语' },
+  { code: 'ko', name: '韩语' }
+]
+
+// 历史流 state
+const historyTab = ref<'history' | 'saved'>('history')
+const historyItems = ref<HistoryItem[]>([])
+const savedIds = ref<Set<string>>(new Set())
+const hideHistory = ref(false)
+
 /** 最近一次完成翻译的原文，用来识别「只是改了内容」还是「原样重跑」。 */
 let lastTranslated = ''
 let debounceTimer: number | undefined
@@ -35,11 +60,21 @@ let autoPending = false
 const modeOptions = computed(() => meta.value.modes.map(([k, label]) => ({ value: k as Mode, label })))
 const styleOptions = computed(() => meta.value.styles)
 const formatOptions = computed(() => meta.value.format_types)
-
 const allLangs = computed<[string, string][]>(() => meta.value.languages)
 
-onMounted(() => {
+// 当前显示的历史卡片列表
+const displayedHistory = computed(() => {
+  if (historyTab.value === 'saved') {
+    return historyItems.value.filter((i) => savedIds.value.has(i.id))
+  }
+  return historyItems.value.slice(0, 5) // 主页瀑布流展示前 5 条 + 1 个 Show all
+})
+
+onMounted(async () => {
   loadGlossaryTerms()
+  await loadRecentHistory()
+  loadSavedIds()
+
   window.addEventListener('hymt2:reuse', onReuse)
   const pending = localStorage.getItem('hymt2:reuse')
   if (pending) {
@@ -48,12 +83,44 @@ onMounted(() => {
   }
 })
 
+function loadSavedIds() {
+  try {
+    const raw = localStorage.getItem('hymt2:saved_history_ids')
+    if (raw) savedIds.value = new Set(JSON.parse(raw))
+  } catch {}
+}
+
+function toggleStar(id: string) {
+  if (savedIds.value.has(id)) {
+    savedIds.value.delete(id)
+  } else {
+    savedIds.value.add(id)
+  }
+  localStorage.setItem('hymt2:saved_history_ids', JSON.stringify([...savedIds.value]))
+}
+
+async function loadRecentHistory() {
+  try {
+    historyItems.value = await api.historyList(undefined, 20)
+  } catch {}
+}
+
 function onReuse(e: Event) {
   const item = (e as CustomEvent).detail
   source.value = item.source
   result.value = item.translation
   targetLang.value = item.target_lang
   mode.value = item.mode as Mode
+  lastTranslated = item.source
+}
+
+function applyHistoryCard(item: HistoryItem) {
+  source.value = item.source
+  result.value = item.translation
+  targetLang.value = item.target_lang
+  lastTranslated = item.source
+  inputEl.value?.focus()
+  toast('已恢复历史记录到翻译区', 'info')
 }
 
 // ---------- glossary ----------
@@ -82,8 +149,6 @@ function parseTerms(): [string, string][] {
 // ---------- streaming ----------
 const unlisten: Array<() => void> = []
 
-// `crypto.randomUUID` is unavailable in non-secure contexts; fall back so a
-// job id always exists rather than throwing before the request is sent.
 function newJobId(): string {
   const c = globalThis.crypto
   if (c && typeof c.randomUUID === 'function') return c.randomUUID()
@@ -126,7 +191,7 @@ async function run() {
       await listen<{ job_id: string; text: string }>('hymt2:delta', (e) => {
         if (e.payload.job_id !== currentJob.value) return
         result.value += e.payload.text
-        const out = document.querySelector('.pane__output')
+        const out = document.querySelector('.card-pane__body--out')
         if (out) out.scrollTop = out.scrollHeight
       })
     )
@@ -140,6 +205,7 @@ async function run() {
           usedTerms.value = e.payload.used_terms ?? []
           lastTranslated = source.value
           busy.value = false
+          loadRecentHistory() // 翻译完成刷新下方历史卡片流
         }
       )
     )
@@ -184,12 +250,10 @@ function clearAll() {
   inputEl.value?.focus()
 }
 
-// 停止输入 1 秒后自动翻译；已翻译过的原文再次触发时跳过（留给 Ctrl+Enter）
 function scheduleAuto() {
   window.clearTimeout(debounceTimer)
   if (!source.value.trim()) return
   debounceTimer = window.setTimeout(() => {
-    // 取当前原文而非入队时的快照：等待期间用户可能又改了几个字。
     const text = source.value
     if (text.trim() === lastTranslated.trim()) return
     if (busy.value) {
@@ -204,25 +268,23 @@ watch(source, () => {
   if (autoTranslate.value) scheduleAuto()
 })
 
-// 补跑上一轮结束前到达的自动翻译，否则长文本翻译期间的输入会丢失。
 watch(busy, (isBusy) => {
   if (isBusy || !autoPending) return
   autoPending = false
   scheduleAuto()
 })
 
-// ---------- misc ----------
-// Hy-MT2 自动识别源语言，交换只需对调文本与目标语言
 function swap() {
   const t = source.value
   source.value = result.value
   result.value = t
   targetLang.value = targetLang.value === '中文' ? '英语' : '中文'
+  lastTranslated = source.value
 }
 
 async function copy(text: string) {
   await navigator.clipboard.writeText(text)
-  toast('已复制', 'success')
+  toast('已复制到剪贴板', 'success')
 }
 
 async function showPrompt() {
@@ -237,436 +299,502 @@ async function showPrompt() {
 </script>
 
 <template>
-  <div class="gt">
-    <!-- 语言选择：Hy-MT2 自动识别源语言，因此只有目标语言可选 -->
-    <div class="langrow">
-      <div class="langrow__hint">源语言自动识别</div>
-      <div class="langrow__target">
-        <span class="langrow__label">译为</span>
-        <LangSelect v-model="targetLang" :options="allLangs" />
-      </div>
-    </div>
+  <div class="gt-main">
+    <!-- 主翻译双卡片容器 -->
+    <div class="workspace">
+      <!-- 左侧：输入卡片（纯白卡片，微阴影，大圆角） -->
+      <section class="card-pane card-pane--in">
+        <!-- 语言选择胶囊行 -->
+        <header class="card-pane__header">
+          <div class="lang-group">
+            <button
+              v-for="l in quickSourceLangs"
+              :key="l.code"
+              class="lang-pill"
+              :class="{ 'lang-pill--active': sourceLang === l.code }"
+              @click="sourceLang = l.code"
+            >
+              {{ l.name }}
+            </button>
+            <LangSelect v-model="sourceLang" :options="allLangs" />
+          </div>
+        </header>
 
-    <!-- 双栏 -->
-    <div class="panes">
-      <section class="pane pane--src">
-        <button
-          v-if="source"
-          class="clear"
-          title="清空原文与译文 (Esc)"
-          @click="clearAll"
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M18 6L6 18M6 6l12 12" />
+        <!-- 输入区域 -->
+        <div class="card-pane__body">
+          <textarea
+            ref="inputEl"
+            v-model="source"
+            class="editor-input"
+            placeholder="输入或粘贴文本…"
+            spellcheck="false"
+            @keydown.ctrl.enter="run"
+            @keydown.esc="clearAll"
+          />
+
+          <!-- 极简清空 ✕ 按钮（只在有内容时显现） -->
+          <button
+            v-if="source"
+            class="action-btn action-btn--clear"
+            title="清空所有内容 (Esc)"
+            @click="clearAll"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M18 6L6 18M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+
+        <!-- 左卡片底栏 -->
+        <footer class="card-pane__footer">
+          <div class="footer-left">
+            <!-- 语音/查看提示词图标（对齐设计图左下角微标） -->
+            <button class="footer-icon-btn" title="查看发送的完整模型提示词" @click="showPrompt">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
+                <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+                <line x1="12" y1="19" x2="12" y2="22" />
+              </svg>
+            </button>
+            <button class="footer-icon-btn" title="提示词参数配置" @click="showAdvanced = !showAdvanced">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="3" />
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+              </svg>
+            </button>
+          </div>
+
+          <div class="footer-right">
+            <span class="char-count">{{ source.length }} / 5000</span>
+            <label class="auto-switch" title="停止输入 1 秒后自动执行翻译">
+              <input v-model="autoTranslate" type="checkbox" />
+              <span class="auto-switch__label">自动翻译</span>
+            </label>
+            <button
+              class="primary-go-btn"
+              :disabled="busy || !source.trim()"
+              title="立即执行翻译 (Ctrl+Enter)"
+              @click="run"
+            >
+              <span v-if="busy" class="spinner" />
+              <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                <line x1="5" y1="12" x2="19" y2="12" />
+                <polyline points="12 5 19 12 12 19" />
+              </svg>
+            </button>
+          </div>
+        </footer>
+      </section>
+
+      <!-- 中央正中浮动圆形交换按钮 -->
+      <div class="swap-dock">
+        <button class="floating-swap-btn" title="交换语言与内容" @click="swap">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M8 3L4 7l4 4" />
+            <path d="M4 7h16" />
+            <path d="M16 21l4-4-4-4" />
+            <path d="M20 17H4" />
           </svg>
         </button>
-        <textarea
-          ref="inputEl"
-          v-model="source"
-          class="pane__input"
-          placeholder="输入或粘贴文本…"
-          spellcheck="false"
-          @keydown.ctrl.enter="run"
-          @keydown.esc="clearAll"
-        />
-        <div class="pane__bar">
-          <span class="count">{{ source.length }} 字</span>
-          <span class="grow" />
-          <label class="tbtn switch" title="停止输入 1 秒后自动翻译">
-            <input v-model="autoTranslate" type="checkbox" />
-            自动翻译
+      </div>
+
+      <!-- 右侧：译文卡片（微浅蓝底色 #f0f4f9，雅致反差） -->
+      <section class="card-pane card-pane--out">
+        <!-- 目标语言选择胶囊行 -->
+        <header class="card-pane__header">
+          <div class="lang-group">
+            <button
+              v-for="l in quickTargetLangs"
+              :key="l.code"
+              class="lang-pill"
+              :class="{ 'lang-pill--active': targetLang === l.name }"
+              @click="targetLang = l.name"
+            >
+              {{ l.name }}
+            </button>
+            <LangSelect v-model="targetLang" :options="allLangs" align="right" />
+          </div>
+
+          <!-- 右上角收藏星标（对齐设计图） -->
+          <button
+            class="star-btn"
+            title="收藏本条翻译"
+            :class="{ 'star-btn--on': currentJob && savedIds.has(currentJob) }"
+            @click="currentJob && toggleStar(currentJob)"
+          >
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
+            </svg>
+          </button>
+        </header>
+
+        <!-- 译文输出区域 -->
+        <div class="card-pane__body card-pane__body--out">
+          <p v-if="failed" class="error-msg">⚠️ {{ failed }}</p>
+          <div v-else-if="result" class="output-text">
+            {{ result }}<span v-if="busy" class="stream-caret" />
+          </div>
+          <p v-else-if="busy" class="placeholder-msg">模型思考翻译中…</p>
+          <p v-else class="placeholder-msg">译文将实时显示于此</p>
+        </div>
+
+        <!-- 右卡片底栏 -->
+        <footer class="card-pane__footer">
+          <div class="footer-left">
+            <span v-if="elapsed && result" class="time-tag">{{ (elapsed / 1000).toFixed(1) }}s</span>
+            <!-- 命中术语展示 -->
+            <div v-if="usedTerms.length" class="terms-tag-group">
+              <span v-for="t in usedTerms" :key="t" class="term-pill">{{ t }}</span>
+            </div>
+          </div>
+
+          <div class="footer-right">
+            <!-- 复制按钮 -->
+            <button
+              class="footer-icon-btn"
+              :disabled="!result"
+              title="复制译文"
+              @click="copy(result)"
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="9" y="9" width="13" height="13" rx="2" />
+                <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" />
+              </svg>
+            </button>
+            <!-- 反向翻译按钮 -->
+            <button
+              class="footer-icon-btn"
+              :disabled="!result"
+              title="反向翻译"
+              @click="swap"
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M17 1l4 4-4 4" />
+                <path d="M3 11V9a4 4 0 0 1 4-4h14" />
+                <path d="M7 23l-4-4 4-4" />
+                <path d="M21 13v2a4 4 0 0 1-4 4H3" />
+              </svg>
+            </button>
+          </div>
+        </footer>
+      </section>
+    </div>
+
+    <!-- 高级配置抽屉（折叠状态） -->
+    <transition name="drop">
+      <div v-if="showAdvanced" class="adv-drawer">
+        <div class="adv-grid">
+          <label class="adv-field">
+            <span class="adv-field__label">翻译模式</span>
+            <select v-model="mode" class="select">
+              <option v-for="m in modeOptions" :key="m.value" :value="m.value">{{ m.label }}</option>
+            </select>
           </label>
-          <button class="tbtn" @click="showAdvanced = !showAdvanced">
-            高级
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-              <path d="M6 9l6 6 6-6" />
-            </svg>
-          </button>
-          <button class="go" :disabled="busy || !source.trim()" title="翻译 (Ctrl+Enter)" @click="run">
-            <span v-if="busy" class="spin" />
-            <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M21 12a9 9 0 11-3-6.7" />
-              <path d="M21 3v6h-6" />
-            </svg>
-          </button>
+          <label v-if="mode === 'style'" class="adv-field">
+            <span class="adv-field__label">目标风格</span>
+            <select v-model="style" class="select">
+              <option v-for="s in styleOptions" :key="s" :value="s">{{ s }}</option>
+            </select>
+          </label>
+          <label v-if="mode === 'structured'" class="adv-field">
+            <span class="adv-field__label">数据格式</span>
+            <select v-model="formatType" class="select">
+              <option v-for="f in formatOptions" :key="f" :value="f">{{ f }}</option>
+            </select>
+          </label>
+          <label v-if="mode === 'context'" class="adv-field adv-field--grow">
+            <span class="adv-field__label">背景信息</span>
+            <input v-model="context" class="input" placeholder="例如：医学报告或工程机械展会场景" />
+          </label>
         </div>
-      </section>
 
-      <!-- 悬浮交换按钮 -->
-      <button class="swap" title="交换语言" @click="swap">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M16 3l4 4-4 4" />
-          <path d="M20 7H4" />
-          <path d="M8 21l-4-4 4-4" />
-          <path d="M4 17h16" />
-        </svg>
-      </button>
-
-      <section class="pane pane--out">
-        <div class="pane__output">
-          <p v-if="failed" class="result result--error">⚠️ {{ failed }}</p>
-          <p v-else-if="result" class="result">
-            {{ result }}<span v-if="busy" class="caret" />
-          </p>
-          <p v-else-if="busy" class="ph">翻译中…</p>
-          <p v-else class="ph">译文</p>
-        </div>
-        <div class="pane__bar">
-          <span v-if="result && !busy" class="count">{{ (elapsed / 1000).toFixed(1) }}s</span>
-          <span class="grow" />
-          <button v-if="result" class="tbtn tbtn--icon" title="复制" @click="copy(result)">
-            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="9" y="9" width="13" height="13" rx="2" />
-              <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" />
-            </svg>
-          </button>
-          <button v-if="result" class="tbtn tbtn--icon" title="反向翻译" @click="swap">
-            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M7 17L3 13l4-4" />
-              <path d="M3 13h13a5 5 0 015 5v1" />
-            </svg>
-          </button>
-        </div>
-      </section>
-    </div>
-
-    <!-- 命中术语 -->
-    <div v-if="usedTerms.length" class="hits">
-      命中术语：<span v-for="t in usedTerms" :key="t" class="pill pill--sm pill--on">{{ t }}</span>
-    </div>
-
-    <!-- 高级面板 -->
-    <div v-if="showAdvanced" class="adv">
-      <div class="adv__row">
-        <label class="adv__field">
-          <span class="adv__label">翻译模式</span>
-          <select v-model="mode" class="select">
-            <option v-for="m in modeOptions" :key="m.value" :value="m.value">{{ m.label }}</option>
-          </select>
-        </label>
-        <label v-if="mode === 'style'" class="adv__field">
-          <span class="adv__label">目标风格</span>
-          <select v-model="style" class="select">
-            <option v-for="s in styleOptions" :key="s" :value="s">{{ s }}</option>
-          </select>
-        </label>
-        <label v-if="mode === 'structured'" class="adv__field">
-          <span class="adv__label">数据格式</span>
-          <select v-model="formatType" class="select">
-            <option v-for="f in formatOptions" :key="f" :value="f">{{ f }}</option>
-          </select>
-        </label>
-        <label v-if="mode === 'context'" class="adv__field adv__field--grow">
-          <span class="adv__label">背景信息</span>
-          <input v-model="context" class="input" placeholder="例如：医学检测报告场景" />
-        </label>
-      </div>
-
-      <div v-if="mode === 'terminology'" class="adv__row adv__row--col">
-        <span class="adv__label">术语（每行一条：源词 =&gt; 译词）· 词库「{{ glossary.active }}」</span>
-        <textarea v-model="termsEditor" class="input mono" rows="3" spellcheck="false" />
-        <div class="adv__checks">
-          <label class="check"><input v-model="autoFilterTerms" type="checkbox" /> 仅使用原文命中的词</label>
-          <label class="check"><input v-model="ignoreGlossary" type="checkbox" /> 未命中时退回基础翻译</label>
+        <div v-if="mode === 'terminology'" class="adv-term-box">
+          <span class="adv-field__label">专有术语（源词 =&gt; 译词，每行一条）· 激活词库「{{ glossary.active }}」</span>
+          <textarea v-model="termsEditor" class="input" rows="3" spellcheck="false" />
+          <div class="adv-term-opts">
+            <label class="check"><input v-model="autoFilterTerms" type="checkbox" /> 仅使用原文命中的词</label>
+            <label class="check"><input v-model="ignoreGlossary" type="checkbox" /> 未命中时退回基础翻译</label>
+          </div>
         </div>
       </div>
-    </div>
+    </transition>
 
-    <!-- 底部状态条 -->
-    <div class="statusbar">
-      <select
-        class="chip"
-        :value="settings.active_id"
-        @change="pickBackend(($event.target as HTMLSelectElement).value)"
-      >
-        <option v-for="b in settings.backends" :key="b.id" :value="b.id">
-          {{ b.name }}{{ b.has_api_key ? ' 🔑' : '' }}
-        </option>
-      </select>
-      <span class="pill pill--sm">{{ modeOptions.find((m) => m.value === mode)?.label }}</span>
-      <span class="grow" />
-      <button class="tbtn" @click="showPrompt">查看提示词</button>
-    </div>
+    <!-- 底部区域：对齐设计图下半部分的 History & Saved 瀑布卡片流 -->
+    <section class="history-stream">
+      <header class="history-stream__header">
+        <div class="stream-tabs">
+          <button
+            class="stream-tab"
+            :class="{ 'stream-tab--active': historyTab === 'history' }"
+            @click="historyTab = 'history'"
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="10" />
+              <polyline points="12 6 12 12 16 14" />
+            </svg>
+            <span>History</span>
+          </button>
+          <button
+            class="stream-tab"
+            :class="{ 'stream-tab--active': historyTab === 'saved' }"
+            @click="historyTab = 'saved'"
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
+            </svg>
+            <span>Saved ({{ savedIds.size }})</span>
+          </button>
+        </div>
+
+        <div class="stream-actions">
+          <button class="text-action-btn" @click="hideHistory = !hideHistory">
+            {{ hideHistory ? 'Show' : 'Hide' }}
+          </button>
+          <button class="footer-icon-btn" title="查看完整历史页面" @click="emit('view-all-history')">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+              <circle cx="12" cy="5" r="2" />
+              <circle cx="12" cy="12" r="2" />
+              <circle cx="12" cy="19" r="2" />
+            </svg>
+          </button>
+        </div>
+      </header>
+
+      <!-- 历史卡片网格列表 -->
+      <div v-if="!hideHistory" class="history-grid">
+        <article
+          v-for="item in displayedHistory"
+          :key="item.id"
+          class="hist-card"
+          @click="applyHistoryCard(item)"
+        >
+          <div class="hist-card__head">
+            <span class="lang-tag">
+              {{ item.source_lang === 'auto' ? '自动' : item.source_lang }} › {{ item.target_lang }}
+            </span>
+            <span class="grow" />
+            <button
+              class="card-star"
+              :class="{ 'card-star--on': savedIds.has(item.id) }"
+              title="收藏"
+              @click.stop="toggleStar(item.id)"
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
+              </svg>
+            </button>
+          </div>
+
+          <p class="hist-card__src">{{ item.source }}</p>
+          <p class="hist-card__trans">{{ item.translation }}</p>
+        </article>
+
+        <!-- "Show all >" 入口卡片（对齐设计图右下角） -->
+        <article class="hist-card hist-card--showall" @click="emit('view-all-history')">
+          <div class="showall-inner">
+            <span>Show all</span>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="9 18 15 12 9 6" />
+            </svg>
+          </div>
+        </article>
+      </div>
+    </section>
   </div>
 </template>
 
 <style scoped>
-.gt {
+.gt-main {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-2);
   height: 100%;
-  padding: 0 var(--sp-5) var(--sp-4);
+  padding: 20px 28px 24px;
   overflow-y: auto;
+  box-sizing: border-box;
+  background: var(--c-bg);
 }
 
-/* 语言选择行：左侧提示自动识别，右侧为目标语言下拉 */
-.langrow {
+/* 核心工作区：双卡片 + 中央悬浮交换钮 */
+.workspace {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  min-height: 380px;
+  flex-shrink: 0;
+}
+
+.card-pane {
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--r-xl);
+  overflow: hidden;
+  box-sizing: border-box;
+  transition: all 0.2s ease;
+}
+
+/* 左侧输入卡片：白底，细微柔和边框，柔和微阴影 */
+.card-pane--in {
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  box-shadow: 0 2px 12px rgba(60, 64, 67, 0.04);
+}
+
+.card-pane--in:focus-within {
+  border-color: #b0c9f0;
+  box-shadow: 0 4px 16px rgba(26, 115, 232, 0.08);
+}
+
+/* 右侧输出卡片：极雅致浅淡蓝灰底色，与左侧对比明快 */
+.card-pane--out {
+  background: var(--c-pane-out-bg);
+  border: 1px solid #e1e7f0;
+}
+
+/* 卡片顶部语言药丸栏 */
+.card-pane__header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: var(--sp-4);
-  padding-bottom: var(--sp-2);
+  height: 52px;
+  padding: 0 16px;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.05);
 }
 
-.langrow__hint {
-  font-size: 13px;
-  color: var(--c-text-tertiary);
-}
-
-.langrow__target {
+.lang-group {
   display: flex;
   align-items: center;
-  gap: var(--sp-2);
+  gap: 8px;
 }
 
-.langrow__label {
-  font-size: 13px;
-  color: var(--c-text-secondary);
-}
-
-/* 药丸 */
-.pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 14px;
+.lang-pill {
+  padding: 8px 16px;
   font-family: inherit;
   font-size: 14px;
+  font-weight: 500;
   color: var(--c-text-secondary);
   background: none;
   border: none;
   border-radius: var(--r-pill);
   cursor: pointer;
+  transition: all 0.15s ease;
   white-space: nowrap;
-  transition: background 0.15s;
 }
 
-.pill:hover {
+.lang-pill:hover {
   background: var(--c-surface-hover);
+  color: var(--c-text);
 }
 
-.pill--on {
+.lang-pill--active {
+  background: var(--c-pill-bg);
   color: var(--c-pill-text);
-  background: var(--c-pill-bg);
+  font-weight: 600;
 }
 
-.pill--on:hover {
-  background: var(--c-pill-bg);
+.star-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  background: none;
+  border: none;
+  border-radius: 50%;
+  color: var(--c-text-tertiary);
+  cursor: pointer;
+  transition: all 0.15s;
 }
 
-/* 双栏 */
-.panes {
+.star-btn:hover {
+  background: rgba(0, 0, 0, 0.05);
+  color: var(--c-text);
+}
+
+.star-btn--on {
+  color: #fbbc04;
+}
+
+.star-btn--on svg {
+  fill: #fbbc04;
+}
+
+/* 卡片主输入/输出区：大字号 20px，极度清晰舒适 */
+.card-pane__body {
   position: relative;
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  flex: 1;
-  min-height: 300px;
-}
-
-.pane {
   display: flex;
-  flex-direction: column;
-  min-width: 0;
-  min-height: 0;
-  background: var(--c-surface-alt);
+  flex: 1;
+  min-height: 240px;
+  padding: 20px 24px;
+  overflow-y: auto;
 }
 
-.pane:first-child {
-  border-top-left-radius: var(--r-xl);
-  border-bottom-left-radius: var(--r-xl);
-}
-
-.pane--out {
-  border-top-right-radius: var(--r-xl);
-  border-bottom-right-radius: var(--r-xl);
-}
-
-.pane__input,
-.pane__output {
+/* 作为 flex item 被块级化，不再产生 inline-block 的基线间隙，
+   否则 height 填满时仍会溢出 4px 而显示空滚动条。 */
+.editor-input {
   flex: 1;
   min-height: 0;
-  padding: var(--sp-5) var(--sp-5) var(--sp-2);
+  width: 100%;
   font-family: var(--font-ui);
-  font-size: 17px;
-  line-height: 1.75;
+  font-size: 20px;
+  line-height: 1.6;
   color: var(--c-text);
   background: transparent;
   border: none;
   outline: none;
   resize: none;
-  overflow-y: auto;
+  box-sizing: border-box;
 }
 
-.pane__input::placeholder,
-.ph {
+.editor-input::placeholder {
   color: var(--c-text-tertiary);
 }
 
-.ph {
-  margin: 0;
-}
-
-.result {
-  margin: 0;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.result--error {
-  color: var(--c-danger);
-  font-size: 15px;
-}
-
-/* 底部工具条 */
-.pane__bar {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-1);
-  padding: var(--sp-2) var(--sp-4) var(--sp-3);
-}
-
-.count {
-  font-size: 12px;
-  color: var(--c-text-tertiary);
-}
-
-.grow {
-  flex: 1;
-}
-
-.tbtn {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 7px 12px;
-  font-family: inherit;
-  font-size: 13px;
-  color: var(--c-text-secondary);
-  background: none;
-  border: none;
-  border-radius: var(--r-pill);
-  cursor: pointer;
-}
-
-.tbtn:hover {
-  background: var(--c-surface-hover);
-  color: var(--c-text);
-}
-
-.tbtn--icon {
-  padding: 7px;
-}
-
-.go {
+.action-btn--clear {
+  position: absolute;
+  top: 18px;
+  right: 18px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 38px;
-  height: 38px;
-  color: var(--c-text-secondary);
+  width: 32px;
+  height: 32px;
   background: none;
-  border: 1px solid var(--c-border);
+  border: none;
   border-radius: 50%;
+  color: var(--c-text-secondary);
   cursor: pointer;
   transition: background 0.15s;
 }
 
-.go:hover:not(:disabled) {
+.action-btn--clear:hover {
   background: var(--c-surface-hover);
-}
-
-.go:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-
-.spin {
-  width: 15px;
-  height: 15px;
-  border: 2px solid var(--c-border);
-  border-top-color: var(--c-text-secondary);
-  border-radius: 50%;
-  animation: spin 0.7s linear infinite;
-}
-
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-/* 悬浮交换按钮 */
-.swap {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  z-index: 10;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 52px;
-  height: 52px;
-  color: var(--c-pill-text);
-  background: var(--c-pill-bg);
-  border: none;
-  border-radius: var(--r-xl);
-  box-shadow: var(--shadow-float);
-  cursor: pointer;
-  transform: translate(-50%, -50%);
-  transition:
-    transform 0.18s,
-    box-shadow 0.18s;
-}
-
-.swap:hover {
-  transform: translate(-50%, -50%) scale(1.06);
-  box-shadow: 0 4px 12px rgba(60, 64, 67, 0.24);
-}
-
-/* 清空按钮：贴在输入区右上角 */
-.clear {
-  position: absolute;
-  top: 10px;
-  right: 12px;
-  z-index: 5;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 26px;
-  height: 26px;
-  color: var(--c-text-tertiary);
-  background: transparent;
-  border: none;
-  border-radius: 50%;
-  cursor: pointer;
-}
-
-.clear:hover {
   color: var(--c-text);
-  background: rgba(60, 64, 67, 0.12);
 }
 
-.pane--src {
-  position: relative;
+.output-text {
+  font-size: 20px;
+  line-height: 1.6;
+  color: var(--c-text);
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
-/* 自动翻译开关 */
-.switch {
-  cursor: pointer;
-  user-select: none;
-}
-
-.switch input {
+.placeholder-msg {
   margin: 0;
-  accent-color: var(--c-primary);
+  font-size: 20px;
+  color: var(--c-text-tertiary);
 }
 
-/* 流式光标 */
-.caret {
+.error-msg {
+  color: var(--c-danger);
+  font-size: 15px;
+}
+
+.stream-caret {
   display: inline-block;
   width: 2px;
-  height: 1.05em;
+  height: 1.1em;
   margin-left: 2px;
   vertical-align: text-bottom;
   background: var(--c-primary);
@@ -674,98 +802,400 @@ async function showPrompt() {
 }
 
 @keyframes blink {
-  50% {
-    opacity: 0;
-  }
+  50% { opacity: 0; }
 }
 
-.hits {
+/* 卡片底栏 */
+.card-pane__footer {
   display: flex;
   align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-  font-size: 12px;
-  color: var(--c-text-secondary);
+  justify-content: space-between;
+  height: 52px;
+  padding: 0 16px 8px;
 }
 
-/* 高级面板 */
-.adv {
-  padding: var(--sp-4);
+.footer-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.footer-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.footer-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  background: none;
+  border: none;
+  border-radius: 50%;
+  color: var(--c-text-secondary);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.footer-icon-btn:hover:not(:disabled) {
+  background: rgba(0, 0, 0, 0.06);
+  color: var(--c-text);
+}
+
+.footer-icon-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.char-count {
+  font-size: 13px;
+  color: var(--c-text-tertiary);
+}
+
+.auto-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--c-text-secondary);
+  cursor: pointer;
+  user-select: none;
+}
+
+.auto-switch input {
+  cursor: pointer;
+}
+
+.primary-go-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  background: var(--c-primary);
+  color: #fff;
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  box-shadow: 0 2px 6px rgba(26, 115, 232, 0.3);
+  transition: all 0.15s;
+}
+
+.primary-go-btn:hover:not(:disabled) {
+  background: var(--c-primary-hover);
+  transform: scale(1.05);
+}
+
+.primary-go-btn:disabled {
+  background: #dadce0;
+  box-shadow: none;
+  cursor: not-allowed;
+}
+
+.spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(255, 255, 255, 0.4);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.time-tag {
+  font-size: 12px;
+  color: var(--c-text-tertiary);
+}
+
+.terms-tag-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.term-pill {
+  padding: 2px 8px;
+  font-size: 11px;
+  color: var(--c-pill-text);
+  background: var(--c-pill-bg);
+  border-radius: var(--r-pill);
+}
+
+/* 中央悬浮交换按钮：浮于两张卡片正中央 */
+.swap-dock {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 10;
+  pointer-events: none;
+}
+
+.floating-swap-btn {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  background: #ffffff;
+  color: var(--c-text-secondary);
+  border: 1px solid var(--c-border);
+  border-radius: 50%;
+  box-shadow: 0 3px 12px rgba(60, 64, 67, 0.12);
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.floating-swap-btn:hover {
+  background: var(--c-surface-hover);
+  color: var(--c-primary);
+  transform: scale(1.1);
+  box-shadow: 0 4px 16px rgba(26, 115, 232, 0.2);
+}
+
+/* 高级配置抽屉 */
+.adv-drawer {
+  margin-top: 16px;
+  padding: 16px 20px;
   background: var(--c-surface-alt);
   border-radius: var(--r-lg);
-  border-left: 3px solid var(--c-pill-bg);
+  border: 1px solid var(--c-border-soft);
 }
 
-.adv__row {
+.adv-grid {
   display: flex;
-  gap: var(--sp-3);
   flex-wrap: wrap;
+  gap: 16px;
 }
 
-.adv__row--col {
+.adv-field {
+  display: flex;
   flex-direction: column;
-  margin-top: var(--sp-2);
+  gap: 6px;
 }
 
-.adv__field {
-  min-width: 190px;
-}
-
-.adv__field--grow {
+.adv-field--grow {
   flex: 1;
 }
 
-.adv__label {
-  display: block;
-  margin-bottom: 4px;
+.adv-field__label {
   font-size: 12px;
+  font-weight: 500;
   color: var(--c-text-secondary);
 }
 
-.adv__checks {
+.adv-term-box {
+  margin-top: 14px;
   display: flex;
-  gap: var(--sp-4);
-  margin-top: 6px;
-  flex-wrap: wrap;
+  flex-direction: column;
+  gap: 8px;
 }
 
-.check {
+.adv-term-opts {
+  display: flex;
+  gap: 16px;
+  font-size: 13px;
+}
+
+/* 底部区域：对齐设计图下半部分的 History & Saved 瀑布卡片流 */
+.history-stream {
+  margin-top: 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.history-stream__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--c-border-soft);
+  padding-bottom: 10px;
+}
+
+.stream-tabs {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+}
+
+.stream-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 4px;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--c-text-secondary);
+  background: none;
+  border: none;
+  cursor: pointer;
+  position: relative;
+  transition: color 0.15s;
+}
+
+.stream-tab:hover {
+  color: var(--c-text);
+}
+
+.stream-tab--active {
+  color: var(--c-primary);
+  font-weight: 600;
+}
+
+.stream-tab--active::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -11px;
+  height: 3px;
+  background: var(--c-primary);
+  border-radius: 3px 3px 0 0;
+}
+
+.stream-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.text-action-btn {
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--c-text-secondary);
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+
+.text-action-btn:hover {
+  color: var(--c-text);
+}
+
+/* 瀑布卡片网格布局（对齐设计图 3 列多行） */
+.history-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 16px;
+}
+
+.hist-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border-soft);
+  border-radius: var(--r-lg);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.hist-card:hover {
+  border-color: #c2d7fa;
+  box-shadow: 0 4px 14px rgba(60, 64, 67, 0.06);
+  transform: translateY(-2px);
+}
+
+.hist-card__head {
+  display: flex;
+  align-items: center;
+}
+
+.lang-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--c-pill-text);
+  background: var(--c-pill-bg);
+  border-radius: var(--r-pill);
+}
+
+.card-star {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  background: none;
+  border: none;
+  border-radius: 50%;
+  color: var(--c-text-tertiary);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.card-star:hover {
+  background: rgba(0, 0, 0, 0.05);
+  color: var(--c-text);
+}
+
+.card-star--on {
+  color: #fbbc04;
+}
+
+.card-star--on svg {
+  fill: #fbbc04;
+}
+
+.hist-card__src {
+  margin: 0;
+  font-size: 14px;
+  color: var(--c-text);
+  line-height: 1.5;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.hist-card__trans {
+  margin: 0;
+  font-size: 13px;
+  color: var(--c-text-secondary);
+  line-height: 1.5;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* "Show all >" 卡片样式 */
+.hist-card--showall {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--c-surface-alt);
+  border: 1px dashed var(--c-border);
+}
+
+.hist-card--showall:hover {
+  background: var(--c-primary-soft);
+  border-color: var(--c-primary);
+}
+
+.showall-inner {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 12px;
-  color: var(--c-text-secondary);
-  cursor: pointer;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--c-primary);
 }
 
-.mono {
-  font-family: var(--font-mono);
-  font-size: 13px;
-  line-height: 1.7;
-}
-
-/* 底部状态条 */
-.statusbar {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  margin-top: var(--sp-1);
-  padding-top: var(--sp-3);
-  border-top: 1px solid var(--c-divider);
-}
-
-.chip {
-  padding: 5px 26px 5px 12px;
-  font-family: inherit;
-  font-size: 12px;
-  color: var(--c-pill-text);
-  background-color: var(--c-pill-bg);
-  border: none;
-  border-radius: var(--r-pill);
-  appearance: none;
-  cursor: pointer;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 24 24' fill='none' stroke='%23185abc' stroke-width='3'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 10px center;
+.grow {
+  flex: 1;
 }
 </style>

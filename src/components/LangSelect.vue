@@ -1,11 +1,15 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 
-const props = defineProps<{
-  modelValue: string
-  options: [string, string][]
-  label?: string
-}>()
+const props = withDefaults(
+  defineProps<{
+    modelValue: string
+    options: [string, string][]
+    align?: 'left' | 'right'
+  }>(),
+  { align: 'left' }
+)
+
 const emit = defineEmits<{ (e: 'update:modelValue', v: string): void }>()
 
 const open = ref(false)
@@ -13,8 +17,6 @@ const query = ref('')
 const root = ref<HTMLElement | null>(null)
 const searchBox = ref<HTMLInputElement | null>(null)
 const listEl = ref<HTMLElement | null>(null)
-
-const currentName = computed(() => props.modelValue)
 
 const filtered = computed(() => {
   const q = query.value.trim().toLowerCase()
@@ -59,15 +61,14 @@ onUnmounted(() => {
 
 <template>
   <div ref="root" class="langpick">
-    <button class="pill pill--on langpick__btn" @click="open = !open">
-      {{ currentName }}
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+    <button class="pill pill--icon-only" title="展开更多语言" @click="open = !open">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
         <path d="M6 9l6 6 6-6" />
       </svg>
     </button>
 
-    <div v-if="open" class="langpick__menu">
-      <input ref="searchBox" v-model="query" class="langpick__search" placeholder="搜索语言…" />
+    <div v-if="open" class="langpick__menu" :class="{ 'langpick__menu--right': align === 'right' }">
+      <input ref="searchBox" v-model="query" class="langpick__search" placeholder="搜索 38 种语言…" />
       <div ref="listEl" class="langpick__list">
         <button
           v-for="[code, name] in filtered"
@@ -88,30 +89,50 @@ onUnmounted(() => {
 <style scoped>
 .langpick {
   position: relative;
+  display: inline-flex;
 }
 
-.langpick__btn {
+.pill--icon-only {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  color: var(--c-text-secondary);
+  background: none;
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.pill--icon-only:hover {
+  background: var(--c-surface-hover);
+  color: var(--c-text);
 }
 
 .langpick__menu {
   position: absolute;
-  top: calc(100% + 6px);
+  top: calc(100% + 8px);
   left: 0;
-  z-index: 40;
-  width: 240px;
-  padding: 8px;
+  z-index: 50;
+  width: 260px;
+  padding: 10px;
   background: var(--c-surface);
   border: 1px solid var(--c-border-soft);
   border-radius: var(--r-lg);
-  box-shadow: var(--shadow-md);
+  box-shadow: var(--shadow-float);
+}
+
+.langpick__menu--right {
+  left: auto;
+  right: 0;
 }
 
 .langpick__search {
   width: 100%;
-  padding: 8px 12px;
+  padding: 8px 14px;
   font-family: inherit;
   font-size: 13px;
   color: var(--c-text);
@@ -119,32 +140,37 @@ onUnmounted(() => {
   border: none;
   border-radius: var(--r-pill);
   outline: none;
+  box-sizing: border-box;
 }
 
 .langpick__search:focus {
-  box-shadow: 0 0 0 2px var(--c-primary-soft);
+  background: #fff;
+  box-shadow: 0 0 0 2px var(--c-primary);
 }
 
 .langpick__list {
-  max-height: 260px;
-  margin-top: 6px;
+  max-height: 280px;
+  margin-top: 8px;
   overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
 .langpick__opt {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  width: 100%;
-  padding: 9px 12px;
+  padding: 8px 12px;
   font-family: inherit;
-  font-size: 14px;
-  text-align: left;
+  font-size: 13px;
   color: var(--c-text);
   background: none;
   border: none;
   border-radius: var(--r-md);
   cursor: pointer;
+  text-align: left;
+  transition: background 0.12s;
 }
 
 .langpick__opt:hover {
@@ -152,20 +178,21 @@ onUnmounted(() => {
 }
 
 .langpick__opt--on {
-  color: var(--c-pill-text);
+  color: var(--c-primary);
   background: var(--c-primary-soft);
+  font-weight: 600;
 }
 
 .langpick__code {
   font-size: 11px;
   color: var(--c-text-tertiary);
+  text-transform: uppercase;
 }
 
 .langpick__none {
-  margin: 0;
-  padding: var(--sp-3);
-  font-size: 13px;
-  text-align: center;
+  margin: 16px 0;
+  font-size: 12px;
   color: var(--c-text-tertiary);
+  text-align: center;
 }
 </style>
