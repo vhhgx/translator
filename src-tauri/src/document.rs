@@ -103,21 +103,21 @@ fn looks_like_markdown(text: &str) -> bool {
 pub fn segment_markdown(text: &str) -> Vec<DocumentSegment> {
     let mut segments: Vec<DocumentSegment> = Vec::new();
     let mut buf = String::new();
+    let mut buf_kind = "prose";
     let mut in_fence = false;
-    let mut idx = 0usize;
-
-    let flush = |segments: &mut Vec<DocumentSegment>, buf: &mut String, kind: &str| {
-        if !buf.trim().is_empty() {
-            segments.push(DocumentSegment {
-                index: idx,
-                translatable: true,
-                kind: kind.to_string(),
-                text: std::mem::take(buf),
-            });
-        }
-    };
-
     let mut fence_buf = String::new();
+
+    fn push(segments: &mut Vec<DocumentSegment>, kind: &str, text: String, translatable: bool) {
+        if text.trim().is_empty() {
+            return;
+        }
+        segments.push(DocumentSegment {
+            index: 0,
+            translatable,
+            kind: kind.to_string(),
+            text,
+        });
+    }
 
     for line in text.split_inclusive('\n') {
         let trimmed = line.trim_start();
@@ -126,26 +126,13 @@ pub fn segment_markdown(text: &str) -> Vec<DocumentSegment> {
         if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
             if in_fence {
                 fence_buf.push_str(line);
-                segments.push(DocumentSegment {
-                    index: idx,
-                    translatable: false,
-                    kind: "code".into(),
-                    text: std::mem::take(&mut fence_buf),
-                });
+                push(&mut segments, "code", std::mem::take(&mut fence_buf), false);
                 in_fence = false;
             } else {
-                if !buf.trim().is_empty() {
-                    segments.push(DocumentSegment {
-                        index: idx,
-                        translatable: true,
-                        kind: "prose".into(),
-                        text: std::mem::take(&mut buf),
-                    });
-                }
+                push(&mut segments, buf_kind, std::mem::take(&mut buf), true);
                 fence_buf.push_str(line);
                 in_fence = true;
             }
-            idx += 1;
             continue;
         }
 
@@ -155,14 +142,8 @@ pub fn segment_markdown(text: &str) -> Vec<DocumentSegment> {
         }
 
         // Front-matter / YAML header.
-        if trimmed.starts_with("---") && buf.is_empty() {
-            segments.push(DocumentSegment {
-                index: idx,
-                translatable: false,
-                kind: "frontmatter".into(),
-                text: line.to_string(),
-            });
-            idx += 1;
+        if trimmed.starts_with("---") && buf.trim().is_empty() && segments.is_empty() {
+            push(&mut segments, "frontmatter", line.to_string(), false);
             continue;
         }
 
@@ -175,35 +156,26 @@ pub fn segment_markdown(text: &str) -> Vec<DocumentSegment> {
         } else if trimmed.starts_with("- ")
             || trimmed.starts_with("* ")
             || trimmed.starts_with("+ ")
-            || trimmed.chars().next().is_some_and(|c| c.is_ascii_digit()) && trimmed.contains(". ")
+            || (trimmed.chars().next().is_some_and(|c| c.is_ascii_digit()) && trimmed.contains(". "))
         {
             "list"
         } else {
             "prose"
         };
 
-        if kind != "prose" && !buf.trim().is_empty() {
-            segments.push(DocumentSegment {
-                index: idx,
-                translatable: true,
-                kind: "prose".into(),
-                text: std::mem::take(&mut buf),
-            });
-            idx += 1;
+        // A new kind closes the pending block, so headings/lists stay separate.
+        if kind != buf_kind && !buf.trim().is_empty() {
+            push(&mut segments, buf_kind, std::mem::take(&mut buf), true);
         }
+        buf_kind = kind;
         buf.push_str(line);
     }
 
     if in_fence && !fence_buf.is_empty() {
-        segments.push(DocumentSegment {
-            index: idx,
-            translatable: false,
-            kind: "code".into(),
-            text: fence_buf,
-        });
-        idx += 1;
+        push(&mut segments, "code", fence_buf, false);
     }
-    flush(&mut segments, &mut buf, "prose");
+    push(&mut segments, buf_kind, buf, true);
+
     for (i, s) in segments.iter_mut().enumerate() {
         s.index = i;
     }
@@ -301,9 +273,8 @@ mod tests {
         assert_eq!(s, "你好");
         assert_eq!(enc, "UTF-8");
 
-        let mut gbk = Vec::new();
         let (cow, _, _) = encoding_rs::GB18030.encode("中文编码测试");
-        gbk.extend_from_slice(cow);
+        let gbk = cow.into_owned();
         let (s2, enc2) = decode(&gbk);
         assert_eq!(s2, "中文编码测试");
         assert!(enc2.contains("GB"), "got {enc2}");
@@ -315,7 +286,6 @@ mod tests {
         let segs = segment_markdown(md);
         assert!(segs.iter().any(|s| s.kind == "code" && !s.translatable));
         assert!(segs.iter().any(|s| s.kind == "heading"));
-        // code text survives round-trip untouched
         let out = reassemble(&segs, &[]);
         assert_eq!(out, md);
     }
@@ -332,13 +302,10 @@ mod tests {
 
     #[test]
     fn output_path_gets_suffix() {
-        assert_eq!(
-            output_path("C:/a/b/readme.md", "英语"),
-            "C:\\a\\b\\readme.英语.md".replace('\\', "/")
-        );
-        assert_eq!(
-            output_path("notes.txt", "zh-CN"),
-            "notes.zh-CN.txt"
-        );
+        // Non-ASCII language names become a safe ASCII tag.
+        assert!(output_path("C:/a/b/readme.md", "英语").ends_with("readme.zh-CN.md"));
+        // ASCII tags pass through unchanged.
+        assert_eq!(output_path("notes.txt", "zh-CN"), "notes.zh-CN.txt");
+        assert!(output_path("C:/a/b/readme.md", "en").ends_with("readme.en.md"));
     }
 }

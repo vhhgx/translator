@@ -66,9 +66,10 @@ pub const STYLES: [&str; 12] = [
 
 pub const FORMAT_TYPES: [&str; 5] = ["JSON", "HTML", "XML", "YAML", "Markdown"];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
+    #[default]
     Basic,
     Terminology,
     Style,
@@ -100,13 +101,17 @@ impl Mode {
 }
 
 /// Resolve an abbreviation ("en") or Chinese name ("英语") to the Chinese name.
+///
+/// Prompts always interpolate the **Chinese name**, so both input forms must
+/// produce it — returning the abbreviation here would put "翻译为zh" into the
+/// prompt and degrade the model's output.
 pub fn resolve_language(lang: &str) -> Result<String, String> {
     let lang = lang.trim();
     if let Some((_, name)) = SUPPORTED_LANGUAGES.iter().find(|(abbr, _)| *abbr == lang) {
         return Ok(name.to_string());
     }
-    if let Some((abbr, _)) = SUPPORTED_LANGUAGES.iter().find(|(_, name)| *name == lang) {
-        return Ok(abbr.to_string());
+    if SUPPORTED_LANGUAGES.iter().any(|(_, name)| *name == lang) {
+        return Ok(lang.to_string());
     }
     Err(format!(
         "不支持的语言: {lang:?}\n请使用缩写(如 en)或中文名(如 英语)之一。"
@@ -202,9 +207,12 @@ mod tests {
 
     #[test]
     fn language_resolution() {
+        // Both forms must resolve to the Chinese name, because prompts
+        // interpolate it directly.
         assert_eq!(resolve_language("en").unwrap(), "英语");
-        assert_eq!(resolve_language("英语").unwrap(), "en");
+        assert_eq!(resolve_language("英语").unwrap(), "英语");
         assert_eq!(resolve_language(" zh ").unwrap(), "中文");
+        assert_eq!(resolve_language("中文").unwrap(), "中文");
         assert!(resolve_language("klingon").is_err());
     }
 

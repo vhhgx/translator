@@ -184,7 +184,14 @@ mod tests {
         let mut g = Glossary::default();
         g.create_set("产品").unwrap();
         assert_eq!(g.active, "产品");
-        g.set_terms("产品", vec![["订单", "ticket"], ["", "x"], ["仓库", "repo"]]);
+        g.set_terms(
+            "产品",
+            vec![
+                ["订单".to_string(), "ticket".to_string()],
+                ["".to_string(), "x".to_string()],
+                ["仓库".to_string(), "repo".to_string()],
+            ],
+        );
         assert_eq!(g.terms("产品").len(), 2); // blank row dropped
         g.rename_set("产品", "产品文档").unwrap();
         assert_eq!(g.active, "产品文档");
@@ -206,14 +213,17 @@ mod tests {
         g.import(
             "默认",
             vec![
-                ["订单", "ticket"],
-                ["仓库", "repo"],
+                ["订单".to_string(), "ticket".to_string()],
+                ["仓库".to_string(), "repo".to_string()],
             ],
             false,
         );
-        g.import("默认", vec![["订单", "ticket"]], false);
+        g.import("默认", vec![["订单".to_string(), "ticket".to_string()]], false);
         assert_eq!(g.terms("默认").len(), 2);
-        g.import("默认", vec![["发票", "invoice"]], true);
-        assert_eq!(g.terms("默认"), vec![["发票".to_string(), "invoice".to_string()]]);
+        g.import("默认", vec![["发票".to_string(), "invoice".to_string()]], true);
+        assert_eq!(
+            g.terms("默认"),
+            vec![["发票".to_string(), "invoice".to_string()]]
+        );
     }
 }

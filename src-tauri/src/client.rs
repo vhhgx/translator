@@ -101,29 +101,36 @@ pub fn compose(req: &TranslateRequest) -> AppResult<(String, String, Vec<String>
     }
 
     if mode == Mode::Terminology {
-        if req.ignore_glossary && req.terms.is_empty() {
+        // Nothing left to constrain: fall back rather than send an empty
+        // "参考下面的翻译：" block, which would confuse the model.
+        if terms.is_empty() && (req.auto_filter_terms || req.ignore_glossary) {
             mode = Mode::Basic;
-        } else if req.terms.is_empty() {
+        } else if terms.is_empty() {
             return Err(AppError::Translate(
                 "术语约束模式需要至少一条术语（或勾选「仅使用原文命中的词」）".into(),
             ));
         }
     }
 
-    // Glossary pairs are stored source->target; flip them when the translation
-    // runs the other way (glossary zh->en, task en->zh).
-    let reverse = resolved == "中文"
-        && req
-            .terms
-            .first()
-            .map(|p| !p[0].chars().any(is_cjk))
-            .unwrap_or(false);
-    let terminology = prompt::terminology_string(&terms, reverse);
-    let used: Vec<String> = terms
-        .iter()
-        .map(|p| p[0].trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
+    // Glossary pairs are stored one direction (commonly zh->en). Decide
+    // orientation PER TERM by checking which side actually occurs in the
+    // source text, so en->zh tasks flip correctly without re-authoring.
+    let mut lines: Vec<String> = Vec::new();
+    let mut used: Vec<String> = Vec::new();
+    for pair in &terms {
+        let (a, b) = (pair[0].trim(), pair[1].trim());
+        if a.is_empty() || b.is_empty() {
+            continue;
+        }
+        if req.text.contains(b) && !req.text.contains(a) {
+            lines.push(format!("{b}翻译成{a}"));
+            used.push(b.to_string());
+        } else {
+            lines.push(format!("{a}翻译成{b}"));
+            used.push(a.to_string());
+        }
+    }
+    let terminology = lines.join("\n");
 
     let style = if req.style.trim().is_empty() {
         "日常口语化风格"
@@ -146,10 +153,6 @@ pub fn compose(req: &TranslateRequest) -> AppResult<(String, String, Vec<String>
         &req.context,
     );
     Ok((built, resolved, used))
-}
-
-fn is_cjk(c: char) -> bool {
-    matches!(c as u32, 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF | 0x20000..=0x2FA1F)
 }
 
 pub async fn translate(

@@ -3,6 +3,7 @@ import { onMounted, ref } from 'vue'
 import { api, err, toast } from '../api'
 import { glossary, loadGlossary } from '../composables/useAppState'
 import { open, save } from '@tauri-apps/plugin-dialog'
+import { invoke } from '@tauri-apps/api/core'
 
 const rows = ref<[string, string][]>([])
 const newName = ref('')
@@ -103,9 +104,8 @@ async function doImport() {
   }
 }
 
-/** @tauri-apps/plugin-fs 未引入，这里用 Rust 命令写文件更简单。 */
+/** 写文件走 Rust 命令，避免额外依赖 plugin-fs。 */
 async function writeText(path: string, content: string) {
-  const { invoke } = await import('@tauri-apps/api/core')
   await invoke('doc_save', { path, content })
 }
 </script>

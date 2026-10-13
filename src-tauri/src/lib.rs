@@ -3,15 +3,15 @@
 //! Rust owns config, credentials, HTTP and document IO; the Vue layer is
 //! presentation only.
 
-mod client;
-mod config;
-mod document;
-mod error;
-mod glossary;
-mod history;
-mod prompt;
+pub mod client;
+pub mod config;
+pub mod document;
+pub mod error;
+pub mod glossary;
+pub mod history;
+pub mod prompt;
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use tauri::{Manager, State};
@@ -314,7 +314,7 @@ fn doc_save(path: String, content: String) -> CmdResult<()> {
 }
 
 #[tauri::command]
-fn doc_translate(
+async fn doc_translate(
     state: State<'_, AppState>,
     path: String,
     target_lang: String,
@@ -340,47 +340,46 @@ fn doc_translate(
     let terminology = prompt::terminology_string(&terms, reverse);
     let concurrency = concurrency.unwrap_or(3).clamp(1, 8);
 
-    let mut results: Vec<(usize, String)> = Vec::new();
-    let mut errors: Vec<(usize, String)> = Vec::new();
-    let total = doc.segments.iter().filter(|s| s.translatable).count();
-    let queue = std::sync::Arc::new(tokio::sync::Mutex::new(
+let mut results: Vec<(usize, String)> = Vec::new();
+    let mut errors: Vec<(i32, String)> = Vec::new();
+
+    // Own the translatable texts so worker tasks don't borrow `doc`.
+    let work: Arc<Vec<(usize, String)>> = Arc::new(
         doc.segments
             .iter()
             .filter(|s| s.translatable)
-            .map(|s| s.index)
-            .collect::<Vec<_>>(),
-    ));
-    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency));
+            .map(|s| (s.index, s.text.clone()))
+            .collect(),
+    );
+    let total = work.len();
+    let next = Arc::new(tokio::sync::Mutex::new(0usize));
     let mut tasks = Vec::new();
 
     for _ in 0..concurrency {
-        let queue = queue.clone();
-        let sem = semaphore.clone();
+        let work = work.clone();
+        let next = next.clone();
         let backend = backend.clone();
         let key = key.clone();
         let terminology = terminology.clone();
         let lang = lang.clone();
         tasks.push(tokio::spawn(async move {
+            let mut out: Vec<(usize, Result<String, String>)> = Vec::new();
             loop {
-                let Some(index) = {
-                    let mut q = queue.lock().await;
-                    if q.is_empty() {
+                let i = {
+                    let mut n = next.lock().await;
+                    if *n >= work.len() {
                         None
                     } else {
-                        Some(q.remove(0))
+                        let v = *n;
+                        *n += 1;
+                        Some(v)
                     }
-                } else {
-                    break;
                 };
-                let _permit = sem.acquire().await.ok();
-                let text = doc
-                    .segments
-                    .iter()
-                    .find(|s| s.index == index)
-                    .map(|s| s.text.clone())
-                    .unwrap_or_default();
+                let Some(i) = i else { break };
+
+                let (index, text) = &work[i];
                 let p = prompt::build_prompt(
-                    &text,
+                    text,
                     &lang,
                     Mode::Basic,
                     &terminology,
@@ -399,18 +398,27 @@ fn doc_translate(
                     context: String::new(),
                     ignore_glossary: true,
                 };
-                match client::translate(&backend, key.as_deref(), temperature, timeout, &req).await {
-                    Ok(r) => (index, Ok(r.text)),
-                    Err(e) => (index, Err(e.to_string())),
-                }
+                let r = match client::translate(&backend, key.as_deref(), temperature, timeout, &req).await
+                {
+                    Ok(r) => Ok(r.text),
+                    Err(e) => Err(e.to_string()),
+                };
+                out.push((*index, r));
             }
+            out
         }));
     }
 
     for t in tasks {
         match t.await {
-            Ok((index, Ok(text))) => results.push((index, text)),
-            Ok((index, Err(e))) => errors.push((index, e)),
+            Ok(items) => {
+                for (index, r) in items {
+                    match r {
+                        Ok(text) => results.push((index, text)),
+                        Err(e) => errors.push((index as i32, e)),
+                    }
+                }
+            }
             Err(e) => errors.push((-1, e.to_string())),
         }
     }
@@ -465,20 +473,19 @@ async fn batch_translate(
         }
     }
 
-    let mut items: Vec<(usize, serde_json::Value)> = Vec::new();
+    let mut items: Vec<(usize, String)> = Vec::new();
     for (i, line) in raw.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        let Ok(mut v) = serde_json::from_str::<serde_json::Value>(line) else {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
-        let Some(text) = v.get(&field).and_then(|x| x.as_str()).map(|s| s.to_string()) else {
-            continue;
-        };
-        if !text.trim().is_empty() {
-            items.push((i, v));
+        if let Some(text) = v.get(&field).and_then(|x| x.as_str()) {
+            if !text.trim().is_empty() {
+                items.push((i, text.to_string()));
+            }
         }
     }
     let total = items.len();
@@ -493,70 +500,91 @@ async fn batch_translate(
     };
     let key = config::load_secret(&backend.id);
     let concurrency = concurrency.unwrap_or(3).clamp(1, 16);
-    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency));
+    let work = Arc::new(items);
+    let next = Arc::new(tokio::sync::Mutex::new(0usize));
     let mut tasks = Vec::new();
-    let mut results: Vec<(usize, serde_json::Value)> = Vec::new();
     let mut failed = 0usize;
 
-    for (idx, value) in items {
-        let Some(text) = value.get(&field).and_then(|x| x.as_str()).map(|s| s.to_string()) else {
-            continue;
-        };
+    for _ in 0..concurrency {
+        let work = work.clone();
+        let next = next.clone();
         let backend = backend.clone();
         let key = key.clone();
         let lang = lang.clone();
-        let sem = sem.clone();
         tasks.push(tokio::spawn(async move {
-            let _permit = sem.acquire().await.ok();
-            let p = prompt::build_prompt(&text, &lang, Mode::Basic, "", "", "", "");
-            let req = TranslateRequest {
-                text: p,
-                target_lang: lang.clone(),
-                mode: Mode::Basic,
-                terms: vec![],
-                auto_filter_terms: false,
-                style: String::new(),
-                format_type: String::new(),
-                context: String::new(),
-                ignore_glossary: true,
-            };
-            let translated =
-                client::translate(&backend, key.as_deref(), temperature, timeout, &req).await;
-            (idx, translated)
+            let mut out: Vec<(usize, Result<String, String>)> = Vec::new();
+            loop {
+                let i = {
+                    let mut n = next.lock().await;
+                    if *n >= work.len() {
+                        None
+                    } else {
+                        let v = *n;
+                        *n += 1;
+                        Some(v)
+                    }
+                };
+                let Some(i) = i else { break };
+
+                let (idx, text) = &work[i];
+                let p = prompt::build_prompt(text, &lang, Mode::Basic, "", "", "", "");
+                let req = TranslateRequest {
+                    text: p,
+                    target_lang: lang.clone(),
+                    mode: Mode::Basic,
+                    terms: vec![],
+                    auto_filter_terms: false,
+                    style: String::new(),
+                    format_type: String::new(),
+                    context: String::new(),
+                    ignore_glossary: true,
+                };
+                let r = match client::translate(&backend, key.as_deref(), temperature, timeout, &req).await
+                {
+                    Ok(r) => Ok(r.text),
+                    Err(e) => Err(e.to_string()),
+                };
+                out.push((*idx, r));
+            }
+            out
         }));
     }
 
+    let mut translated: Vec<(usize, String)> = Vec::new();
     for t in tasks {
         match t.await {
-            Ok((idx, Ok(r))) => {
-                let (_, mut v) = items
-                    .iter()
-                    .find(|(i, _)| *i == idx)
-                    .cloned()
-                    .map(|(i, v)| (i, v))
-                    .unwrap_or((0, serde_json::json!({})));
-                v["translation"] = serde_json::Value::String(r.text);
-                results.push((idx, v));
+            Ok(items) => {
+                for (idx, r) in items {
+                    match r {
+                        Ok(text) => translated.push((idx, text)),
+                        Err(_) => failed += 1,
+                    }
+                }
             }
-            _ => failed += 1,
+            Err(_) => failed += concurrency,
         }
     }
 
-    results.sort_by_key(|(i, _)| *i);
     let mut out = String::new();
     for v in done {
         out.push_str(&v.to_string());
         out.push('\n');
     }
-    for (_, v) in &results {
-        out.push_str(&v.to_string());
-        out.push('\n');
+    // Re-read the original records so untouched fields survive.
+    for (line_no, text) in translated.iter() {
+        if let Some(orig) = raw.lines().nth(*line_no) {
+            if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(orig.trim()) {
+                v["translation"] = serde_json::Value::String(text.clone());
+                out.push_str(&v.to_string());
+                out.push('\n');
+            }
+        }
     }
     std::fs::write(&output, out).map_err(|e| AppError::Io(format!("写入失败: {e}")))?;
 
     Ok(BatchProgress {
         total,
-        done: results.len(),
+        done: translated.len(),
         failed,
         output,
     })
@@ -587,9 +615,9 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
             app.manage(AppState {
-                settings: Mutex::new(settings.clone()),
-                glossary: Mutex::new(glossary.clone()),
-                history: Mutex::new(history.clone()),
+                settings: Mutex::new(settings),
+                glossary: Mutex::new(glossary),
+                history: Mutex::new(history),
             });
             Ok(())
         })

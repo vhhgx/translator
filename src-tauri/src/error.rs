@@ -6,7 +6,6 @@ pub enum AppError {
     Credential(String),
     Http(String),
     Translate(String),
-    Model(String),
 }
 
 impl std::fmt::Display for AppError {
@@ -16,7 +15,6 @@ impl std::fmt::Display for AppError {
             AppError::Credential(m) => write!(f, "凭据存储错误: {m}"),
             AppError::Http(m) => write!(f, "网络错误: {m}"),
             AppError::Translate(m) => write!(f, "翻译失败: {m}"),
-            AppError::Model(m) => write!(f, "模型错误: {m}"),
         }
     }
 }
@@ -32,6 +30,12 @@ impl From<std::io::Error> for AppError {
 impl From<serde_json::Error> for AppError {
     fn from(e: serde_json::Error) -> Self {
         AppError::Io(e.to_string())
+    }
+}
+
+impl From<String> for AppError {
+    fn from(e: String) -> Self {
+        AppError::Translate(e)
     }
 }
 
