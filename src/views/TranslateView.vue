@@ -551,7 +551,9 @@ async function copy(text: string) {
   gap: 8px;
 }
 
+/* 选中态用底部横线表示，不再铺药丸底色 */
 .lang-pill {
+  position: relative;
   padding: 8px 16px;
   font-family: inherit;
   font-size: 14px;
@@ -559,21 +561,29 @@ async function copy(text: string) {
   color: var(--c-text-secondary);
   background: none;
   border: none;
-  border-radius: var(--r-pill);
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: color 0.15s ease;
   white-space: nowrap;
 }
 
 .lang-pill:hover {
-  background: var(--c-surface-hover);
   color: var(--c-text);
 }
 
 .lang-pill--active {
-  background: var(--c-pill-bg);
-  color: var(--c-pill-text);
+  color: var(--c-primary);
   font-weight: 600;
+}
+
+.lang-pill--active::after {
+  content: '';
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 1px;
+  height: 2px;
+  background: var(--c-primary);
+  border-radius: 2px;
 }
 
 .star-btn {

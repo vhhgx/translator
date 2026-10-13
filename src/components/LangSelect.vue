@@ -14,9 +14,10 @@ const emit = defineEmits<{ (e: 'update:modelValue', v: string): void }>()
 
 const open = ref(false)
 const query = ref('')
-const root = ref<HTMLElement | null>(null)
+const triggerEl = ref<HTMLElement | null>(null)
+const menuEl = ref<HTMLElement | null>(null)
 const searchBox = ref<HTMLInputElement | null>(null)
-const listEl = ref<HTMLElement | null>(null)
+const pos = ref({ left: 0, top: 0 })
 
 const filtered = computed(() => {
   const q = query.value.trim().toLowerCase()
@@ -27,11 +28,47 @@ const filtered = computed(() => {
   )
 })
 
+/**
+ * 菜单用 fixed 定位并 Teleport 到 body。
+ *
+ * 之前它是卡片内的绝对定位元素：卡片带 overflow:hidden，既会被圆角裁掉，
+ * 撑大的可滚动区域还会让点击时整个 header 横向滚动，药丸整排被推走。
+ */
+function place() {
+  const t = triggerEl.value
+  const m = menuEl.value
+  if (!t || !m) return
+  const r = t.getBoundingClientRect()
+  const mw = m.offsetWidth
+  const mh = m.offsetHeight
+  const gap = 8
+  const margin = 8
+
+  // 下方放得下就往下，否则翻到上方
+  const top =
+    window.innerHeight - r.bottom > mh + gap ? r.bottom + gap : Math.max(margin, r.top - mh - gap)
+
+  let left = props.align === 'right' ? r.right - mw : r.left
+  left = Math.min(Math.max(margin, left), window.innerWidth - mw - margin)
+
+  pos.value = { left, top }
+}
+
 watch(open, async (v) => {
   if (v) {
     query.value = ''
     await nextTick()
+    // 先渲染再量，菜单高度取决于过滤结果，两遍定位更稳
+    place()
+    await nextTick()
     searchBox.value?.focus()
+  } else {
+    window.removeEventListener('resize', place)
+    window.removeEventListener('scroll', place, true)
+  }
+  if (v) {
+    window.addEventListener('resize', place)
+    window.addEventListener('scroll', place, true)
   }
 })
 
@@ -41,10 +78,12 @@ function choose(name: string) {
 }
 
 function onDocClick(e: MouseEvent) {
-  if (open.value && root.value && !root.value.contains(e.target as Node)) {
-    open.value = false
-  }
+  if (!open.value) return
+  const t = e.target as Node
+  if (triggerEl.value?.contains(t) || menuEl.value?.contains(t)) return
+  open.value = false
 }
+
 function onKey(e: KeyboardEvent) {
   if (e.key === 'Escape') open.value = false
 }
@@ -56,43 +95,51 @@ onMounted(() => {
 onUnmounted(() => {
   document.removeEventListener('click', onDocClick)
   document.removeEventListener('keydown', onKey)
+  window.removeEventListener('resize', place)
+  window.removeEventListener('scroll', place, true)
 })
 </script>
 
 <template>
-  <div ref="root" class="langpick">
-    <button class="pill pill--icon-only" title="展开更多语言" @click="open = !open">
+  <span ref="triggerEl" class="langpick">
+    <button class="langpick__trigger" title="展开更多语言" @click="open = !open">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
         <path d="M6 9l6 6 6-6" />
       </svg>
     </button>
 
-    <div v-if="open" class="langpick__menu" :class="{ 'langpick__menu--right': align === 'right' }">
-      <input ref="searchBox" v-model="query" class="langpick__search" placeholder="搜索 38 种语言…" />
-      <div ref="listEl" class="langpick__list">
-        <button
-          v-for="[code, name] in filtered"
-          :key="code"
-          class="langpick__opt"
-          :class="{ 'langpick__opt--on': name === modelValue }"
-          @click="choose(name)"
-        >
-          <span class="langpick__name">{{ name }}</span>
-          <span class="langpick__code">{{ code }}</span>
-        </button>
-        <p v-if="!filtered.length" class="langpick__none">没有匹配的语言</p>
+    <Teleport to="body">
+      <div
+        v-if="open"
+        ref="menuEl"
+        class="langpick__menu"
+        :style="{ left: `${pos.left}px`, top: `${pos.top}px` }"
+      >
+        <input ref="searchBox" v-model="query" class="langpick__search" placeholder="搜索 38 种语言…" />
+        <div class="langpick__list">
+          <button
+            v-for="[code, name] in filtered"
+            :key="code"
+            class="langpick__opt"
+            :class="{ 'langpick__opt--on': name === modelValue }"
+            @click="choose(name)"
+          >
+            <span class="langpick__name">{{ name }}</span>
+            <span class="langpick__code">{{ code }}</span>
+          </button>
+          <p v-if="!filtered.length" class="langpick__none">没有匹配的语言</p>
+        </div>
       </div>
-    </div>
-  </div>
+    </Teleport>
+  </span>
 </template>
 
 <style scoped>
 .langpick {
-  position: relative;
   display: inline-flex;
 }
 
-.pill--icon-only {
+.langpick__trigger {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -107,27 +154,21 @@ onUnmounted(() => {
   transition: background 0.15s, color 0.15s;
 }
 
-.pill--icon-only:hover {
+.langpick__trigger:hover {
   background: var(--c-surface-hover);
   color: var(--c-text);
 }
 
 .langpick__menu {
-  position: absolute;
-  top: calc(100% + 8px);
-  left: 0;
-  z-index: 50;
+  position: fixed;
+  z-index: 200;
   width: 260px;
   padding: 10px;
   background: var(--c-surface);
   border: 1px solid var(--c-border-soft);
   border-radius: var(--r-lg);
   box-shadow: var(--shadow-float);
-}
-
-.langpick__menu--right {
-  left: auto;
-  right: 0;
+  box-sizing: border-box;
 }
 
 .langpick__search {
