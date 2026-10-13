@@ -40,21 +40,35 @@ pub struct TranslateResponse {
     pub used_terms: Vec<String>,
 }
 
+/// 剥到 API 根地址：容忍用户把 baseurl 填成 `/v1` 甚至完整的
+/// `/v1/chat/completions`，三种写法都归一到同一个根。
+fn api_root(base_url: &str) -> String {
+    let trimmed = base_url.trim_end_matches('/');
+    let without_path = trimmed
+        .strip_suffix("/chat/completions")
+        .unwrap_or(trimmed)
+        .trim_end_matches('/');
+    without_path
+        .strip_suffix("/v1")
+        .unwrap_or(without_path)
+        .to_string()
+}
+
 fn endpoint(base_url: &str) -> String {
     let trimmed = base_url.trim_end_matches('/');
+    // baseurl 常常直接抄成带 /v1 的形式，若再补一段就会变成
+    // /v1/v1/chat/completions —— 服务端只会回 404。
     if trimmed.ends_with("/chat/completions") {
         trimmed.to_string()
+    } else if trimmed.ends_with("/v1") {
+        format!("{trimmed}/chat/completions")
     } else {
         format!("{trimmed}/v1/chat/completions")
     }
 }
 
 fn health_url(base_url: &str) -> String {
-    let trimmed = base_url.trim_end_matches('/');
-    let root = trimmed
-        .strip_suffix("/v1")
-        .unwrap_or(trimmed);
-    format!("{root}/health")
+    format!("{}/health", api_root(base_url))
 }
 
 pub async fn check_health(backend: &Backend) -> Result<Vec<String>, String> {
@@ -68,11 +82,7 @@ pub async fn check_health(backend: &Backend) -> Result<Vec<String>, String> {
         return Err(format!("HTTP {}", resp.status()));
     }
     // Try the models endpoint for a friendly display, but don't require it.
-    let models_url = {
-        let trimmed = backend.base_url.trim_end_matches('/');
-        let root = trimmed.strip_suffix("/v1").unwrap_or(trimmed);
-        format!("{root}/v1/models")
-    };
+    let models_url = format!("{}/v1/models", api_root(&backend.base_url));
     if let Ok(m) = client.get(&models_url).send().await {
         if let Ok(json) = m.json::<serde_json::Value>().await {
             if let Some(arr) = json.get("data").and_then(|d| d.as_array()) {
@@ -360,6 +370,37 @@ mod tests {
             "http://x/v1/chat/completions"
         );
         assert_eq!(health_url("http://127.0.0.1:8080"), "http://127.0.0.1:8080/health");
+    }
+
+    /// baseurl 带 /v1 是最常见的写法，拼错就会得到 /v1/v1/chat/completions。
+    #[test]
+    fn endpoint_accepts_baseurl_already_ending_in_v1() {
+        assert_eq!(
+            endpoint("http://127.0.0.1:8080/v1"),
+            "http://127.0.0.1:8080/v1/chat/completions"
+        );
+        assert_eq!(
+            endpoint("http://127.0.0.1:8080/v1/"),
+            "http://127.0.0.1:8080/v1/chat/completions"
+        );
+        // 三种写法必须收敛到同一个地址
+        assert_eq!(
+            endpoint("http://127.0.0.1:8080/v1"),
+            endpoint("http://127.0.0.1:8080")
+        );
+        assert_eq!(
+            endpoint("http://127.0.0.1:8080/v1"),
+            endpoint("http://127.0.0.1:8080/v1/chat/completions")
+        );
+        // 健康检查与模型列表都从同一个根推导，不能出现 /v1/v1
+        assert_eq!(
+            health_url("http://127.0.0.1:8080/v1"),
+            "http://127.0.0.1:8080/health"
+        );
+        assert_eq!(
+            health_url("http://127.0.0.1:8080/v1/chat/completions"),
+            "http://127.0.0.1:8080/health"
+        );
     }
 
     #[test]

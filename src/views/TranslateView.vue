@@ -530,7 +530,7 @@ async function showPrompt() {
   display: flex;
   flex-direction: column;
   height: 100%;
-  padding: 20px 24px;
+  padding: 0;
   box-sizing: border-box;
   background: var(--c-bg);
 }

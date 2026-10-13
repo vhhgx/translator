@@ -299,7 +299,7 @@ function reuse(item: HistoryItem) {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  height: 40px;
+  height: 60px;
   padding: 0 0 0 12px;
   background: var(--c-surface);
   flex-shrink: 0;
@@ -514,7 +514,7 @@ function reuse(item: HistoryItem) {
 /* 下拉菜单 */
 .menu {
   position: absolute;
-  top: 44px;
+  top: 64px;
   left: 20px;
   z-index: 50;
   display: flex;
