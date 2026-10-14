@@ -847,15 +847,28 @@ pub fn run() {
     let settings = Settings::load();
     let glossary = Glossary::load();
 
-    tauri::Builder::default()
+tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
-        // 关闭事件挂在 Builder 上。状态在 setup 里才 manage，所以运行时再取，
-        // 取不到就按「隐藏到托盘」处理，避免关窗直接杀掉进程导致热键失效。
+        // 状态必须在 Builder 上挂，不能等 setup：config 里声明的窗口是在
+        // setup **之前**就创建并开始加载的（tauri 的 setup() 先遍历
+        // app.windows 建窗，之后才回调用户的 setup 闭包）。popup / mini 虽然
+        // visible:false，webview 照样建、照样加载 index.html，于是它们的
+        // onMounted 会和 app.manage 抢跑，报
+        // 「state not managed for field 'state' on command 'get_settings'」。
+        // Settings::load() / Glossary::load() 只是读文件、不需要 AppHandle，
+        // 所以在这里就能把状态备好，彻底没有抢跑的余地。
+        .manage(AppState {
+            settings: Mutex::new(settings),
+            glossary: Mutex::new(glossary),
+        })
+        // 关闭事件挂在 Builder 上。状态由 Builder::manage 提供，比 setup 更早，
+        // 这里其实一定能取到；仍然用 try_state 并保留兜底，避免这条路径一旦
+        // 出问题就直接把进程杀掉、导致全局热键和托盘一起失效。
         .on_window_event(|win, event| {
             // 小窗是「唤出即用、用完就走」：失焦就藏起来，符合直觉，
             // 也省得用户非要按一次 Esc。
@@ -885,11 +898,6 @@ pub fn run() {
             }
         })
         .setup(move |app| {
-            app.manage(AppState {
-                settings: Mutex::new(settings),
-                glossary: Mutex::new(glossary),
-            });
-
             let handle = app.handle().clone();
             let snapshot = {
                 let st = handle.state::<AppState>();
