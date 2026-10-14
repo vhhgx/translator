@@ -11,6 +11,9 @@ pub mod glossary;
 pub mod history;
 pub mod prompt;
 pub mod selection;
+// Windows 取词走 UI Automation，见该模块说明。只有 Windows 参与编译。
+#[cfg(windows)]
+mod selection_win;
 pub mod tray;
 
 use std::sync::{Arc, Mutex};

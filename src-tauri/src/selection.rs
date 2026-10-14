@@ -1,15 +1,22 @@
 //! 划词翻译：监听全局鼠标，选中文本后自动在光标处弹窗。
 //!
-//! 抓取选中文本用的是划词类工具的通用手法：先清空剪贴板当哨兵 →
-//! 模拟 Ctrl+C → 读回剪贴板 → 还原原剪贴板；读回来还是空的，说明这次
-//! 点击压根没选中东西。
+//! 「怎么把选中的文字取出来」按平台分两套实现：
 //!
-//! 直接用 `rdev::simulate` 发按键而不是引 enigo，是因为 enigo 在 Linux 上
-//! 会硬链 `libxdo`，多一个系统依赖；rdev 走 XTest，够用且已经在了。
+//! - **Windows 走 UI Automation**（见 `selection_win`）。直接问目标应用
+//!   「你当前选中了什么」，**完全不碰剪贴板**。
+//! - **Linux / macOS 目前仍走剪贴板中转**（`capture_selected_text_clip`）：
+//!   写哨兵 → 模拟 Ctrl+C → 读回 → 有条件地还原。这套做法会短暂占用用户
+//!   剪贴板，早先在 Windows 上出过「复制什么都不进去了」的事故，所以
+//!   **没有默认退回**，宁可取不到就不弹窗。后续给 macOS 接上
+//!   Accessibility API（`AXUIElement`）后，这条路径就该退休了。
 //!
-//! 平台限制：整条链路依赖「模拟按键」，所以
-//!   - **Wayland 下不可用**：普通客户端既不能模拟全局按键，也读不到别的应用的选区。
-//!   - macOS 需要先授予「辅助功能」权限，本期未做引导。
+//! 监听本身用 `rdev` 而不是 enigo，是因为 enigo 在 Linux 上会硬链
+//! `libxdo`，多一个系统依赖；rdev 走 XTest，够用且已经在了。
+//!
+//! 平台限制：
+//!   - **Wayland 下划词整体不可用**：普通客户端既不能模拟全局按键，也读不到别的应用的选区。
+//!   - macOS 需要「辅助功能」权限，本期未做引导。
+//!   - Windows 上未实现 UIA 的控件取不到选区，此时不弹窗、不碰剪贴板。
 //! 起不来时不静默失败，错误会通过 `selection_status` 暴露给设置页。
 
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
@@ -27,20 +34,25 @@ const DEBOUNCE: Duration = Duration::from_millis(400);
 const OFFSET: (i32, i32) = (14, 20);
 /// 贴屏幕边缘时保留的空隙。
 const MARGIN: i32 = 8;
-/// 等模拟 Ctrl+C 之后剪贴板被改写的上限。超时就当这次没复制到东西。
-const CAPTURE_TIMEOUT: Duration = Duration::from_millis(200);
-/// 哨兵前缀。既是哨兵的格式，也是启动自愈时识别残留的依据。
-const SENTINEL_PREFIX: &str = "hymt2-sentinel-";
 
-/// 启动自愈：清掉上一次残留的哨兵。
+/// 取词实现：Windows 用 UIA，其它平台暂借剪贴板中转。
+#[cfg(windows)]
+fn capture_selected_text() -> Option<String> {
+    crate::selection_win::selected_text()
+}
+
+#[cfg(not(windows))]
+fn capture_selected_text() -> Option<String> {
+    capture_selected_text_clip()
+}
+
+/// 清掉上一次残留的哨兵。
 ///
-/// 哨兵的生命周期只有捕获那 ~250ms，可进程要是正好死在窗口里（开发时热重载、
-/// 用户从任务管理器结束、或崩溃），这次哨兵就没人还原了，会留在用户剪贴板上。
-/// 更麻烦的是它会自我繁殖：下一次捕获读到 `old` 是哨兵，还原时又写回一个
-/// 哨兵，于是剪贴板被永久毒化——用户表现为「复制什么都不进去了」。
-///
-/// 残留的原文已经随上一个进程一起没了，没法还原，但至少不能让它一直挂在
-/// 剪贴板上等用户粘出一串乱码。
+/// 只对走剪贴板的平台有意义——Windows 已经不写哨兵了。哨兵的生命周期只有
+/// 捕获那 ~250ms，可进程要是正好死在窗口里（热重载、任务管理器强杀、崩溃），
+/// 这次哨兵就没人还原了。更麻烦的是它会自我繁殖：下一次捕获读到 `old` 是
+/// 哨兵，还原时又写回一个哨兵，剪贴板就被永久毒化。
+#[cfg(not(windows))]
 pub fn repair_clipboard() {
     if let Ok(mut cb) = arboard::Clipboard::new() {
         if let Ok(text) = cb.get_text() {
@@ -50,6 +62,10 @@ pub fn repair_clipboard() {
         }
     }
 }
+
+/// Windows 上没有哨兵，留一个空实现，免得调用点还要写条件编译。
+#[cfg(windows)]
+pub fn repair_clipboard() {}
 
 /// 关闭时只是不再抓文本；监听线程一旦起来就不再卸载（rdev 没有 unlisten）。
 static ENABLED: AtomicBool = AtomicBool::new(false);
@@ -263,6 +279,14 @@ fn capture_and_show(app: &AppHandle) {
     show_popup(app, text);
 }
 
+/// 等模拟 Ctrl+C 之后剪贴板被改写的上限。超时就当这次没复制到东西。
+#[cfg(not(windows))]
+const CAPTURE_TIMEOUT: Duration = Duration::from_millis(200);
+/// 哨兵前缀。既是哨兵的格式，也是启动自愈时识别残留的依据。
+#[cfg(not(windows))]
+const SENTINEL_PREFIX: &str = "hymt2-sentinel-";
+
+#[cfg(not(windows))]
 fn clipboard_text() -> Option<String> {
     arboard::Clipboard::new().ok()?.get_text().ok()
 }
@@ -271,6 +295,7 @@ fn clipboard_text() -> Option<String> {
 ///
 /// 抽成纯函数是为了能单独测——这段要是判错，表现就是「用户刚复制的内容
 /// 凭空消失」，而在真机上很难复现出来看。
+#[cfg(not(windows))]
 fn should_restore(current: Option<&str>, captured: Option<&str>, sentinel: &str) -> bool {
     match (current, captured) {
         // 模拟的 Ctrl+C 没复制到东西，剪贴板还是哨兵 → 我们弄的
@@ -285,6 +310,9 @@ fn should_restore(current: Option<&str>, captured: Option<&str>, sentinel: &str)
 
 /// 抓取当前选中的文本；没选中或剪贴板不是文本时返回 None。
 ///
+/// **仅限 Windows 以外的平台。** Windows 走 UIA（`selection_win`），
+/// 这里根本不参与编译——那边一次剪贴板都不碰。
+///
 /// 剪贴板里放的不是文本（图片等）时**直接放弃**：那种内容没法安全地存下来
 /// 再还原，宁可这次不划词，也不要把用户的东西弄丢。
 ///
@@ -297,7 +325,8 @@ fn should_restore(current: Option<&str>, captured: Option<&str>, sentinel: &str)
 ///    紧接着按的 Ctrl+C」会被 old 覆盖掉——用户刚复制的内容凭空消失。
 ///    现在交给 should_restore 判断：还是哨兵、或等于我们自己复制到的，
 ///    才认为是我们弄的、可以还原；期间用户自己复制过的，一律不碰。
-fn capture_selected_text() -> Option<String> {
+#[cfg(not(windows))]
+fn capture_selected_text_clip() -> Option<String> {
     let old = clipboard_text()?;
 
     // 唯一串：同一个进程连续触发也不会撞。
@@ -332,16 +361,31 @@ fn capture_selected_text() -> Option<String> {
 
     // 轮询等剪贴板被改写，而不是固定睡 120ms。
     //
-    // 这个窗口的宽度直接决定「用户点完鼠标紧接着按的 Ctrl+C」会不会被我们
-    // 还原掉：固定睡 120ms 的话，那 120ms 里用户复制的内容和我们模拟出来的
-    // 内容在剪贴板里长得一模一样，事后分不出是谁写的，只能赌自己那份。
-    // 改成一旦发现变化就立刻停，窗口从 120ms 压到几毫秒，撞上的概率
-    // 基本可以忽略。
+    // 这里有两个互相拉扯的约束：
+    //  - 轮询要**轻**。我们在抢剪贴板，4ms 一次等于和目标应用抢 OpenClipboard，
+    //    抢输了它就复制不到东西，弹窗根本不弹——实测踩过这个坑。
+    //  - 窗口要**短**。拖得越久，越容易把用户自己按的 Ctrl+C 混进来。
+    // 所以先给目标应用 30ms 独自落盘，再以 12ms 的间隔轮询。
+    std::thread::sleep(Duration::from_millis(30));
     let deadline = Instant::now() + CAPTURE_TIMEOUT;
-    let mut captured = clipboard_text();
-    while captured.as_deref() == Some(sentinel.as_str()) && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(4));
-        captured = clipboard_text();
+    let mut captured: Option<String> = None;
+    loop {
+        match clipboard_text() {
+            // 内容变了 → 这次 Ctrl+C 复制到东西了
+            Some(t) if t != sentinel => {
+                captured = Some(t);
+                break;
+            }
+            // 还是哨兵 → 目标应用还没写进去，继续等
+            Some(_) => {}
+            // 读不到 = 剪贴板这会儿被别人占着。必须重试，绝不能当成
+            // 「什么都没复制到」提前收工——之前 early-return 导致划词静默失效。
+            None => {}
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(12));
     }
 
     // 有条件地还原：只回滚我们自己造成的改动。
@@ -399,7 +443,8 @@ fn show_popup(app: &AppHandle, text: &str) {
     let _ = win.show();
 }
 
-#[cfg(test)]
+// 这些用例测的是剪贴板路径的还原判定，Windows 不编译那条路径。
+#[cfg(all(test, not(windows)))]
 mod tests {
     use super::*;
 

@@ -35,6 +35,7 @@ rdev = "0.5.3"
 arboard = "3.6.1"
 
 [target.'cfg(windows)'.dependencies]
+uiautomation = { version = "0.25.1", default-features = false, features = ["control", "input", "pattern"] }
 windows-sys = { version = "0.59", features = ["Win32_Foundation"] }
 
 [features]
