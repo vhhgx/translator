@@ -162,10 +162,14 @@ fn cursor() -> (i32, i32) {
     )
 }
 
-/// 光标是否落在弹窗里。落在里面就不隐藏——否则点弹窗上的按钮时，
-/// mousedown 会先把弹窗藏掉，click 落到别的窗口上了。
-fn cursor_in_popup(app: &AppHandle) -> bool {
-    let Some(win) = app.get_webview_window(POPUP_LABEL) else {
+/// 本应用自己的窗口。鼠标落在这些窗口里时不能当成划词——
+/// 抓取要往当前焦点窗口打一串模拟按键，打在自己界面上就是劫持自己的输入
+/// （比如录制热键时，那串合成的 Ctrl+C 会被录制器当成用户按下的组合键收走）。
+const OWN_LABELS: [&str; 3] = ["main", "mini", POPUP_LABEL];
+
+/// 光标是否落在某个可见窗口的矩形内。
+fn cursor_in_window(app: &AppHandle, label: &str) -> bool {
+    let Some(win) = app.get_webview_window(label) else {
         return false;
     };
     if !win.is_visible().unwrap_or(false) {
@@ -176,6 +180,17 @@ fn cursor_in_popup(app: &AppHandle) -> bool {
     };
     let (cx, cy) = cursor();
     cx >= pos.x && cx < pos.x + size.width as i32 && cy >= pos.y && cy < pos.y + size.height as i32
+}
+
+/// 光标是否落在弹窗里。落在里面就不隐藏——否则点弹窗上的按钮时，
+/// mousedown 会先把弹窗藏掉，click 落到别的窗口上了。
+fn cursor_in_popup(app: &AppHandle) -> bool {
+    cursor_in_window(app, POPUP_LABEL)
+}
+
+/// 光标是否在本应用自己的某个窗口里。
+fn cursor_in_own_window(app: &AppHandle) -> bool {
+    OWN_LABELS.iter().any(|l| cursor_in_window(app, l))
 }
 
 fn on_event(app: &AppHandle, event: EventType) {
@@ -192,6 +207,16 @@ fn on_event(app: &AppHandle, event: EventType) {
             }
         }
         EventType::ButtonRelease(Button::Left) => {
+            // 在本应用自己的窗口里点击是一次界面交互，不是划词。这里必须拦：
+            // capture_selected_text 会把合成的 Ctrl+C 打进当前焦点窗口，
+            // 录热键时设置页正收着 keydown，会把那串 Ctrl+C 当成用户按下的组合键
+            // 收走并注册成全局热键——之后每次点按钮都会触发它，主窗口就被 hide 掉。
+            //
+            // 放在 debounce_ok() 之前判断：界面内的点击不应该消耗掉去抖窗口，
+            // 否则紧接着的正常划词会被误判成频率过高而丢掉。
+            if cursor_in_own_window(app) {
+                return;
+            }
             if !ENABLED.load(Ordering::Relaxed) || !modifier_ok() || !debounce_ok() {
                 return;
             }

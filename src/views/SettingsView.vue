@@ -30,6 +30,33 @@ const recording = ref<Which | null>(null)
 /** 录制热键时用到的修饰键集合。 */
 const MODS = ['Control', 'Alt', 'Shift', 'Meta']
 
+/**
+ * 会和全系统快捷键打架的组合，拒收。
+ *
+ * 全局热键是进程级的：注册了 `Ctrl+C`，那么**任何**软件里的复制都会
+ * 被这个程序截走；而且按下时正好会触发热键自己的回调。这里的组合在
+ * 编辑器和资源管理器里都有既定含义，误注册的代价太大。
+ * 想用字母键就再加一层修饰，比如 `Ctrl+Shift+C` 是允许的。
+ */
+const RESERVED = new Set([
+  'Ctrl+C',
+  'Ctrl+V',
+  'Ctrl+X',
+  'Ctrl+A',
+  'Ctrl+Z',
+  'Ctrl+Y',
+  'Ctrl+S',
+  'Ctrl+O',
+  'Ctrl+P',
+  'Ctrl+F',
+  'Ctrl+N',
+  'Ctrl+W',
+  'Ctrl+T',
+  'Ctrl+Q',
+  'Ctrl+R',
+  'Alt+Tab'
+])
+
 function prettyHotkey(e: KeyboardEvent): string | null {
   const key = e.key
   if (['Control', 'Shift', 'Alt', 'Meta'].includes(key)) return null
@@ -64,6 +91,12 @@ function onRecordKey(e: KeyboardEvent) {
  */
 async function applyHotkey(which: Which, accel: string) {
   hotkeyInputs.value[which] = accel
+  if (accel && RESERVED.has(accel)) {
+    // 不往下发：一旦注册上去，这个程序会把所有软件的复制粘贴都截走。
+    hotkeyStates.value[which] = { ok: false, message: `${accel} 是系统常用快捷键，换一个吧` }
+    toast(`${accel} 和系统快捷键冲突，换一个`, 'error')
+    return
+  }
   try {
     await api.setHotkey(which, accel)
     if (which === 'toggle') settings.value.hotkey_toggle = accel
