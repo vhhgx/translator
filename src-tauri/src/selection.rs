@@ -162,8 +162,6 @@ pub fn hide(app: &AppHandle) {
     if let Some(w) = app.get_webview_window(POPUP_LABEL) {
         if w.is_visible().unwrap_or(false) {
             let _ = w.hide();
-            // 弹窗没了，下次同样的文字就是「重新选的」，该弹还得弹。
-            LAST_SHOWN.lock().unwrap().take();
         }
     }
 }
@@ -271,20 +269,29 @@ fn on_event(app: &AppHandle, event: EventType) {
 }
 
 fn capture_and_show(app: &AppHandle) {
-    let Some(text) = capture_selected_text() else {
+    let Some(raw) = capture_selected_text() else {
+        // 没选区 = 用户把选区清掉了。这之后重新选中同样的文字，是一次
+        // 真正的重新划词，该弹还得弹。
+        LAST_SHOWN.lock().unwrap().take();
         return;
     };
-    let text = text.trim();
+    let text = raw.trim();
     // 空 = 这次点击没选中任何东西。
     if text.is_empty() {
         return;
     }
 
-    // 弹窗已经开着、内容又和上一次一模一样 —— 这不是用户重新选了一次，
-    // 而是**旧选区还在**。选完文字后，点滚动条、点工具栏、点窗口里的非文本
-    // 区域都不会清掉选区，UIA 焦点也仍在那个文本控件上，于是每次这样的点击
-    // 都会把同一段文字再取一遍。再弹一次只会闪给用户看。
-    if popup_is_showing(app) && last_shown() == text {
+    // 选中的还是同一段文字 → 不是新划词，是**旧选区还在**。
+    //
+    // 选完文字后点滚动条、工具栏、窗口里的非文本区域，都不会清掉选区，
+    // UIA 焦点也仍停在那个文本控件上。此时若照常弹窗，用户看到的是
+    // 「点哪儿窗口就跟到哪儿，还把刚才那段又翻了一遍」——因为
+    // show_popup 会把窗口挪到光标处。
+    //
+    // 注意判据不能写成「弹窗可见且文字相同」：点空白处时 ButtonPress 已经
+    // 先把弹窗藏了，那样这个条件永远不成立，等于没判（这正是上一版的 bug）。
+    // 真正要问的是「用户有没有重新划词」，所以只看文字本身，不看弹窗状态。
+    if last_shown().as_deref() == Some(text) {
         return;
     }
 
@@ -292,14 +299,9 @@ fn capture_and_show(app: &AppHandle) {
     show_popup(app, text);
 }
 
-fn last_shown() -> String {
-    LAST_SHOWN.lock().unwrap().clone().unwrap_or_default()
-}
-
-fn popup_is_showing(app: &AppHandle) -> bool {
-    app.get_webview_window(POPUP_LABEL)
-        .and_then(|w| w.is_visible().ok())
-        .unwrap_or(false)
+/// 上一次弹窗展示的原文（已 trim）。
+fn last_shown() -> Option<String> {
+    LAST_SHOWN.lock().unwrap().clone()
 }
 
 /// 等模拟 Ctrl+C 之后剪贴板被改写的上限。超时就当这次没复制到东西。
