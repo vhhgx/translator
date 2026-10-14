@@ -10,6 +10,8 @@ import type {
   HistoryItem,
   HotkeyStatus,
   LoadedDocument,
+  LogEntry,
+  LogStatus,
   Meta,
   Settings,
   TranslateRequest,
@@ -130,5 +132,11 @@ export const api = {
       resume
     }),
 
-  readTextFile: (path: string) => invoke<string>('read_text_file', { path })
+  readTextFile: (path: string) => invoke<string>('read_text_file', { path }),
+
+  // ---------- AI 请求审计日志 ----------
+  logList: (limit = 200) => invoke<LogEntry[]>('log_list', { limit }),
+  logStatus: () => invoke<LogStatus>('log_status'),
+  logSetEnabled: (enabled: boolean) => invoke<void>('log_set_enabled', { enabled }),
+  logClear: () => invoke<void>('log_clear')
 }

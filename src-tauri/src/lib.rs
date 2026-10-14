@@ -9,6 +9,7 @@ pub mod document;
 pub mod error;
 pub mod glossary;
 pub mod history;
+pub mod logstore;
 pub mod prompt;
 pub mod selection;
 // Windows 取词走 UI Automation，见该模块说明。只有 Windows 参与编译。
@@ -102,6 +103,29 @@ fn save_settings(
     // 开关一变就同步给监听线程；打开时才真正拉起钩子。
     selection::configure(&app, sel_on, &sel_mod);
     Ok(())
+}
+
+// ---------- 请求日志 ----------
+
+/// 读取最近的 AI 请求审计记录（最新的在前）。
+#[tauri::command]
+fn log_list(limit: Option<usize>) -> Vec<logstore::Entry> {
+    logstore::list(limit.unwrap_or(200).min(logstore::RING_CAPACITY))
+}
+
+#[tauri::command]
+fn log_status() -> logstore::LogStatus {
+    logstore::status()
+}
+
+#[tauri::command]
+fn log_set_enabled(enabled: bool) {
+    logstore::set_enabled(enabled);
+}
+
+#[tauri::command]
+fn log_clear() -> CmdResult<()> {
+    logstore::clear().map_err(AppError::Io)
 }
 
 // ---------- 托盘 / 全局热键 / 开机自启 ----------
@@ -991,7 +1015,9 @@ pub fn run() {
                 (guard.selection_enabled, guard.selection_modifier.clone())
             };
             selection::configure(&handle, sel_on, &sel_mod);
-            // 上个进程若死在捕获窗口里，哨兵会留在用户剪贴板上，启动时清掉。
+            // 旧版的 Ctrl+C 取词方案会把哨兵写进用户剪贴板；上个进程若正好死在
+            // 捕获窗口里，那条哨兵就留下来了。启动时扫一次清掉。
+            // 现行方案（读 PRIMARY）不再写任何东西到剪贴板。
             selection::repair_clipboard();
 
             Ok(())
@@ -1040,6 +1066,10 @@ pub fn run() {
             doc_translate,
             batch_translate,
             read_text_file,
+            log_list,
+            log_status,
+            log_set_enabled,
+            log_clear,
         ])
         .run(tauri::generate_context!())
         .expect("error while running application");

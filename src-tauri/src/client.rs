@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::Backend;
 use crate::error::{AppError, AppResult};
+use crate::logstore;
 use crate::prompt::{self, Mode};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -259,28 +260,34 @@ pub async fn translate_stream(
         "stream": true,
     });
 
-    let mut builder = client.post(endpoint(&backend.base_url));
+    let url = endpoint(&backend.base_url);
+    let mut builder = client.post(&url);
     if let Some(key) = api_key.filter(|k| !k.is_empty()) {
         builder = builder.bearer_auth(key);
     }
 
-    let mut resp = builder
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| AppError::Http(format!("{e}\n\n请确认该后端地址可达（本地服务是否已启动？）")))?;
+    let started = std::time::Instant::now();
+    let mut resp = match builder.json(&body).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            let msg = format!("{e}\n\n请确认该后端地址可达（本地服务是否已启动？）");
+            record_stream_error(backend, &url, &body, started, &msg);
+            return Err(AppError::Http(msg));
+        }
+    };
 
     let status = resp.status();
     if !status.is_success() {
         let raw = resp.text().await.unwrap_or_default();
-        return Err(AppError::Http(format!(
-            "HTTP {status}: {}",
-            &raw[..raw.len().min(400)]
-        )));
+        let msg = format!("HTTP {status}: {}", &raw[..raw.len().min(400)]);
+        record_stream_error(backend, &url, &body, started, &msg);
+        return Err(AppError::Http(msg));
     }
 
     let mut full = String::new();
     let mut buf = String::new();
+    // 诊断用：把每个分片留下，供日志还原「模型是怎么一点点吐出来的」。
+    let mut deltas: Vec<String> = Vec::new();
 
     while let Some(chunk) = resp
         .chunk()
@@ -315,16 +322,61 @@ pub async fn translate_stream(
             {
                 if !delta.is_empty() {
                     full.push_str(delta);
+                    deltas.push(delta.to_string());
                     on_delta(delta);
                 }
             }
         }
     }
 
+    let ms = started.elapsed().as_millis();
     if full.trim().is_empty() {
+        logstore::record(
+            "translate_stream",
+            &backend.id,
+            &backend.model,
+            &url,
+            Some(&body),
+            None,
+            None,
+            ms,
+            Some("模型返回了空内容"),
+        );
         return Err(AppError::Translate("模型返回了空内容".into()));
     }
+    logstore::record(
+        "translate_stream",
+        &backend.id,
+        &backend.model,
+        &url,
+        Some(&body),
+        Some(&full),
+        Some(&deltas),
+        ms,
+        None,
+    );
     Ok(full)
+}
+
+/// 流式请求在「拿到响应之前」就失败时补一条日志。
+fn record_stream_error(
+    backend: &Backend,
+    url: &str,
+    body: &serde_json::Value,
+    started: std::time::Instant,
+    msg: &str,
+) {
+    logstore::record(
+        "translate_stream",
+        &backend.id,
+        &backend.model,
+        url,
+        Some(body),
+        None,
+        None,
+        started.elapsed().as_millis(),
+        Some(msg),
+    );
 }
 
 /// Non-streaming translation: one request, one response.
@@ -355,22 +407,49 @@ pub async fn translate(
         let _ = key; // key travels in the header below, not the body
     }
 
-    let mut builder = client.post(endpoint(&backend.base_url));
+    let url = endpoint(&backend.base_url);
+    let mut builder = client.post(&url);
     if let Some(key) = api_key.filter(|k| !k.is_empty()) {
         builder = builder.bearer_auth(key);
     }
 
     let started = std::time::Instant::now();
-    let resp = builder
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| AppError::Http(format!("{e}\n\n请确认该后端地址可达（本地服务是否已启动？）")))?;
+    let resp = match builder.json(&body).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            let msg = format!("{e}\n\n请确认该后端地址可达（本地服务是否已启动？）");
+            logstore::record(
+                "translate",
+                &backend.id,
+                &backend.model,
+                &url,
+                Some(&body),
+                None,
+                None,
+                started.elapsed().as_millis(),
+                Some(&msg),
+            );
+            return Err(AppError::Http(msg));
+        }
+    };
 
     let status = resp.status();
     let raw = resp.text().await.map_err(|e| AppError::Http(e.to_string()))?;
+    let ms = started.elapsed().as_millis();
     if !status.is_success() {
-        return Err(AppError::Http(format!("HTTP {status}: {}", &raw[..raw.len().min(400)])));
+        let msg = format!("HTTP {status}: {}", &raw[..raw.len().min(400)]);
+        logstore::record(
+            "translate",
+            &backend.id,
+            &backend.model,
+            &url,
+            Some(&body),
+            Some(&raw[..raw.len().min(400)]),
+            None,
+            ms,
+            Some(&msg),
+        );
+        return Err(AppError::Http(msg));
     }
 
     let json: serde_json::Value =
@@ -391,14 +470,38 @@ pub async fn translate(
         .to_string();
 
     if out.is_empty() {
+        logstore::record(
+            "translate",
+            &backend.id,
+            &backend.model,
+            &url,
+            Some(&body),
+            Some(&raw),
+            None,
+            ms,
+            Some("模型返回了空内容"),
+        );
         return Err(AppError::Translate("模型返回了空内容".into()));
     }
+
+    // 记原始响应体：用户要看的是「模型到底回了什么」，包括 choices 之外的字段。
+    logstore::record(
+        "translate",
+        &backend.id,
+        &backend.model,
+        &url,
+        Some(&body),
+        Some(&raw),
+        None,
+        ms,
+        None,
+    );
 
     Ok(TranslateResponse {
         text: out,
         prompt: prompt_text,
         target_lang: resolved,
-        ms: started.elapsed().as_millis(),
+        ms,
         used_terms,
         history_id: None,
     })
@@ -427,21 +530,34 @@ pub async fn detect_language(
             )
         }]
     });
+    let url = endpoint(&backend.base_url);
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(timeout_secs.min(30)))
         .build()
         .map_err(|e| AppError::Http(e.to_string()))?;
-    let mut req = client.post(endpoint(&backend.base_url)).json(&body);
+    let mut req = client.post(&url).json(&body);
     if let Some(k) = key {
         req = req.bearer_auth(k);
     }
-    let raw = req
-        .send()
-        .await
-        .map_err(|e| AppError::Http(e.to_string()))?
-        .text()
-        .await
-        .map_err(|e| AppError::Http(e.to_string()))?;
+    let started = std::time::Instant::now();
+    let raw = match req.send().await {
+        Ok(r) => r.text().await.map_err(|e| AppError::Http(e.to_string()))?,
+        Err(e) => {
+            let msg = e.to_string();
+            logstore::record(
+                "detect_language",
+                &backend.id,
+                &backend.model,
+                &url,
+                Some(&body),
+                None,
+                None,
+                started.elapsed().as_millis(),
+                Some(&msg),
+            );
+            return Err(AppError::Http(msg));
+        }
+    };
     let json: serde_json::Value = serde_json::from_str(&raw)
         .map_err(|e| AppError::Http(format!("响应解析失败: {e}")))?;
     let out = json
@@ -453,6 +569,17 @@ pub async fn detect_language(
         .unwrap_or("")
         .trim()
         .to_lowercase();
+    logstore::record(
+        "detect_language",
+        &backend.id,
+        &backend.model,
+        &url,
+        Some(&body),
+        Some(&raw),
+        None,
+        started.elapsed().as_millis(),
+        None,
+    );
     Ok(out)
 }
 

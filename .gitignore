@@ -46,6 +46,7 @@ scripts/*.png
 .playwright-mcp/
 .claude/
 .zcode/
+.commandcode/
 .vite/
 .turbo/
 

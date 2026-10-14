@@ -131,3 +131,30 @@ export interface KeyStatus {
   backend_id: string
   has_key: boolean
 }
+
+/** 一条 AI 请求审计记录（对应 Rust 的 logstore::Entry） */
+export interface LogEntry {
+  seq: number
+  at: number
+  /** 发起入口：translate / translate_stream / detect_language */
+  kind: string
+  backend_id: string
+  model: string
+  url: string
+  /** 发出去的请求体（已脱敏、长文本已截断） */
+  request?: unknown
+  /** 模型返回。非流式是原始响应体，流式是拼接后的完整文本 */
+  response?: string
+  /** 流式模式下的逐个分片 */
+  deltas?: string[]
+  ms: number
+  error?: string
+}
+
+export interface LogStatus {
+  enabled: boolean
+  count: number
+  /** 落盘文件路径 */
+  path: string
+  bytes: number
+}

@@ -2,11 +2,11 @@
 import { onMounted, ref } from 'vue'
 import type { Component } from 'vue'
 import { listen } from '@tauri-apps/api/event'
-import { BookOpen, Info, Palette, Settings as SettingsIcon, Trash2, X, Zap } from '@lucide/vue'
+import { BookOpen, FileSearch, Info, Palette, RefreshCw, Settings as SettingsIcon, Trash2, X, Zap } from '@lucide/vue'
 import { api, err, toast } from '../api'
 import { activeBackend, saveSettings, settings, tab } from '../composables/useAppState'
 import { setThemeMode, useTheme } from '../composables/useTheme'
-import type { Backend } from '../types'
+import type { Backend, LogEntry, LogStatus } from '../types'
 
 const { themeMode } = useTheme()
 
@@ -15,12 +15,13 @@ const testResult = ref<Record<string, string>>({})
 const keyInputs = ref<Record<string, string>>({})
 
 // ---------- 侧栏分区 ----------
-type Section = 'window' | 'engine' | 'appearance' | 'about'
+type Section = 'window' | 'engine' | 'logs' | 'appearance' | 'about'
 const section = ref<Section>('window')
 
 const SECTIONS: { key: Section; label: string; icon: Component }[] = [
   { key: 'window', label: '窗口唤起与热键', icon: Zap },
   { key: 'engine', label: '翻译引擎与模型', icon: SettingsIcon },
+  { key: 'logs', label: '请求日志', icon: FileSearch },
   { key: 'appearance', label: '外观', icon: Palette },
   { key: 'about', label: '关于与更新', icon: Info }
 ]
@@ -199,6 +200,12 @@ onMounted(async () => {
   refreshSelStatus()
 })
 
+/** 切到日志分区时才拉取，避免每次打开设置都读一遍日志。 */
+function selectSection(key: Section) {
+  section.value = key
+  if (key === 'logs') loadLogs()
+}
+
 async function test(b: Backend) {
   testing.value = b.id
   testResult.value = { ...testResult.value, [b.id]: '' }
@@ -269,6 +276,99 @@ async function removeBackend(b: Backend) {
 }
 
 const APP_VERSION = '0.1.0'
+
+// ---------- 请求日志 ----------
+const logs = ref<LogEntry[]>([])
+const logStatus = ref<LogStatus | null>(null)
+const logLoading = ref(false)
+/** 当前展开查看详情的记录序号；null = 全收起 */
+const openSeq = ref<number | null>(null)
+
+async function loadLogs() {
+  logLoading.value = true
+  try {
+    const [entries, st] = await Promise.all([api.logList(200), api.logStatus()])
+    logs.value = entries
+    logStatus.value = st
+  } catch (e) {
+    err(e)
+  } finally {
+    logLoading.value = false
+  }
+}
+
+async function toggleLogEnabled(v: boolean) {
+  try {
+    await api.logSetEnabled(v)
+    if (!logStatus.value) await loadLogs()
+    else logStatus.value = { ...logStatus.value, enabled: v }
+    toast(v ? '已开启请求记录' : '已暂停请求记录', 'success')
+  } catch (e) {
+    err(e)
+  }
+}
+
+async function clearLogs() {
+  try {
+    await api.logClear()
+    logs.value = []
+    openSeq.value = null
+    await loadLogs()
+    toast('日志已清空', 'success')
+  } catch (e) {
+    err(e)
+  }
+}
+
+/** 把 JSON 拍成带缩进的字符串——用户明确要求可读，不要一长串。 */
+function prettyJson(v: unknown): string {
+  try {
+    return JSON.stringify(v, null, 2)
+  } catch {
+    return String(v)
+  }
+}
+
+/** 响应体是字符串形式的 JSON 时解析出来美化；不是就当纯文本。 */
+function safeJson(s: string): unknown {
+  try {
+    return JSON.parse(s)
+  } catch {
+    return s
+  }
+}
+
+function fmtTime(ms: number): string {
+  const d = new Date(ms)
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+}
+
+function fmtSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+}
+
+/** 入口名友好化 */
+function kindLabel(kind: string): string {
+  return (
+    {
+      translate: '单次翻译',
+      translate_stream: '流式翻译',
+      detect_language: '语种检测'
+    }[kind] ?? kind
+  )
+}
+
+async function copyLog(e: LogEntry) {
+  try {
+    await api.copyText(prettyJson(e))
+    toast('已复制该条记录', 'success')
+  } catch (err2) {
+    err(err2)
+  }
+}
 </script>
 
 <template>
@@ -281,7 +381,7 @@ const APP_VERSION = '0.1.0'
         :key="s.key"
         class="sidebar-item"
         :class="{ 'sidebar-item--active': section === s.key }"
-        @click="section = s.key"
+        @click="selectSection(s.key)"
       >
         <component :is="s.icon" :size="15" class="sidebar-item__icon" />
         <span>{{ s.label }}</span>
@@ -583,8 +683,115 @@ const APP_VERSION = '0.1.0'
         </div>
       </template>
 
-      <!-- ========== 分区 4：关于 ========== -->
-      <template v-else>
+      <!-- ========== 分区 4：请求日志 ========== -->
+      <template v-else-if="section === 'logs'">
+        <div class="section-header">
+          <h2>AI 请求日志</h2>
+          <p>记录每次发给模型的完整请求（prompt）与模型返回的原始内容，用于核对与排障。API Key 已脱敏，仅保留前 4 位</p>
+        </div>
+
+        <div class="settings-card">
+          <div class="setting-row">
+            <div class="setting-info">
+              <div class="setting-title">
+                记录请求与返回
+                <span v-if="logStatus" class="badge-status" :class="{ 'badge-status--bad': !logStatus.enabled }">
+                  {{ logStatus.enabled ? '记录中' : '已暂停' }}
+                </span>
+              </div>
+              <div class="setting-desc">
+                关闭后不再写入新记录，已有日志保留。日志只落本机，路径见下方
+              </div>
+            </div>
+            <label class="switch">
+              <input
+                type="checkbox"
+                :checked="logStatus?.enabled ?? true"
+                @change="toggleLogEnabled(($event.target as HTMLInputElement).checked)"
+              />
+              <span class="slider" />
+            </label>
+          </div>
+
+          <div class="setting-row">
+            <div class="setting-info">
+              <div class="setting-title">存储</div>
+              <div class="setting-desc">
+                内存保留最近 {{ logStatus?.count ?? 0 }} 条（上限 500）；落盘 {{ fmtSize(logStatus?.bytes ?? 0) }}
+                <div class="about-mono log-path">{{ logStatus?.path || '—' }}</div>
+              </div>
+            </div>
+            <div class="log-actions">
+              <button class="btn btn--sm" :disabled="logLoading" @click="loadLogs">
+                <RefreshCw :size="13" /> 刷新
+              </button>
+              <button class="btn btn--sm btn--danger" @click="clearLogs">
+                <Trash2 :size="13" /> 清空
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div v-if="!logs.length" class="settings-card log-empty">
+          {{ logLoading ? '读取中…' : '还没有记录。去翻译一次，这里就会出现完整的请求与返回。' }}
+        </div>
+
+        <div v-for="e in logs" :key="e.seq" class="settings-card log-entry">
+          <button class="log-head" @click="openSeq = openSeq === e.seq ? null : e.seq">
+            <span class="log-kind">{{ kindLabel(e.kind) }}</span>
+            <span class="log-model">{{ e.model || '—' }}</span>
+            <span v-if="e.error" class="badge-status badge-status--bad">失败</span>
+            <span v-else class="badge-status">成功</span>
+            <span class="log-spacer" />
+            <span class="log-ms">{{ e.ms }} ms</span>
+            <span class="log-time">{{ fmtTime(e.at) }}</span>
+            <span class="log-caret" :class="{ 'log-caret--open': openSeq === e.seq }">›</span>
+          </button>
+
+          <div v-if="openSeq === e.seq" class="log-body">
+            <div class="log-meta">
+              <span class="about-label">端点</span>
+              <span class="about-mono">{{ e.url }}</span>
+            </div>
+            <div class="log-meta">
+              <span class="about-label">后端</span>
+              <span class="about-mono">{{ e.backend_id }}</span>
+            </div>
+
+            <div v-if="e.request" class="log-block">
+              <div class="log-block__title">
+                <span>发送给 AI</span>
+                <button class="btn btn--sm btn--ghost" @click="copyLog(e)">复制整条</button>
+              </div>
+              <pre class="log-pre">{{ prettyJson(e.request) }}</pre>
+            </div>
+
+            <div v-if="e.error" class="log-block">
+              <div class="log-block__title"><span>错误</span></div>
+              <pre class="log-pre log-pre--err">{{ e.error }}</pre>
+            </div>
+
+            <div v-if="e.response" class="log-block">
+              <div class="log-block__title">
+                <span>AI 返回{{ e.kind === 'translate_stream' ? '（完整文本）' : '（原始响应体）' }}</span>
+              </div>
+              <pre class="log-pre">{{ e.kind === 'translate_stream' ? e.response : prettyJson(safeJson(e.response)) }}</pre>
+            </div>
+
+            <div v-if="e.deltas?.length" class="log-block">
+              <div class="log-block__title">
+                <span>流式分片（{{ e.deltas.length }} 段）</span>
+              </div>
+              <div class="log-deltas">
+                <span v-for="(d, i) in e.deltas" :key="i" class="log-delta">{{ d }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </template>
+
+      <!-- ========== 分区 5：关于 ========== -->
+      <template v-else-if="section === 'about'">
         <div class="section-header">
           <h2>关于与更新</h2>
           <p>Zephyr Translator — 可接入任意 OpenAI 兼容端点的跨端桌面翻译工具</p>
@@ -1150,5 +1357,160 @@ const APP_VERSION = '0.1.0'
 /* 录制热键时吃掉输入框焦点，避免按键被输入框消费 */
 .settings--recording {
   user-select: none;
+}
+
+/* ---------- 请求日志分区 ---------- */
+.log-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.log-path {
+  margin-top: 4px;
+  color: var(--text-muted);
+  word-break: break-all;
+}
+
+.log-empty {
+  padding: 24px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.log-entry {
+  padding: 0;
+  overflow: hidden;
+}
+
+.log-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 12px 16px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  text-align: left;
+}
+
+.log-head:hover {
+  background: var(--surface-hover);
+}
+
+.log-kind {
+  font-weight: 600;
+  color: var(--text-primary);
+  flex-shrink: 0;
+}
+
+.log-model {
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.log-spacer {
+  flex: 1;
+}
+
+.log-ms,
+.log-time {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.log-caret {
+  flex-shrink: 0;
+  font-size: 16px;
+  line-height: 1;
+  color: var(--text-muted);
+  transition: transform 0.15s;
+  transform: rotate(90deg);
+}
+
+.log-caret--open {
+  transform: rotate(-90deg);
+}
+
+.log-body {
+  padding: 4px 16px 16px;
+  border-top: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.log-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.log-block__title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+
+.log-pre {
+  margin: 0;
+  padding: 12px;
+  background: var(--surface-secondary);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 360px;
+  overflow: auto;
+}
+
+.log-pre--err {
+  color: var(--danger, #e5484d);
+}
+
+.log-deltas {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 10px;
+  background: var(--surface-secondary);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  max-height: 200px;
+  overflow: auto;
+}
+
+.log-delta {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  background: var(--surface-primary);
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  padding: 1px 5px;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 </style>
