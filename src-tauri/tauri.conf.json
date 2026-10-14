@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Hy-MT2 翻译工具",
+  "productName": "Zephyr Translator",
   "version": "0.1.0",
-  "identifier": "com.hymt2.translator",
+  "identifier": "com.zephyr.translator",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:5183",
@@ -12,13 +12,12 @@
   "app": {
     "windows": [
       {
-        "title": "Hy-MT2 翻译工具",
+        "title": "Zephyr Translator",
         "width": 960,
         "height": 640,
         "minWidth": 800,
         "minHeight": 520,
         "resizable": true,
-        "theme": "Light",
         "label": "main",
         "decorations": false,
         "shadow": true
@@ -35,23 +34,21 @@
         "alwaysOnTop": true,
         "skipTaskbar": true,
         "focusable": false,
-        "visible": false,
-        "theme": "Light"
+        "visible": false
       },
       {
         "label": "mini",
         "title": "快速翻译",
-        "width": 560,
-        "height": 320,
-        "minWidth": 420,
-        "minHeight": 200,
+        "width": 336,
+        "height": 360,
+        "minWidth": 280,
+        "minHeight": 240,
         "resizable": true,
         "decorations": false,
         "alwaysOnTop": true,
         "skipTaskbar": true,
         "center": true,
-        "visible": false,
-        "theme": "Light"
+        "visible": false
       }
     ],
     "security": {

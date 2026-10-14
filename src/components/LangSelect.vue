@@ -6,8 +6,11 @@ const props = withDefaults(
     modelValue: string
     options: [string, string][]
     align?: 'left' | 'right'
+    /** 触发器是否显示当前选中项文本。主窗口里语言名在药丸上，触发器只要 chevron；
+     *  小窗/弹窗没有药丸，触发器本身要把当前语言显示出来。 */
+    showLabel?: boolean
   }>(),
-  { align: 'left' }
+  { align: 'left', showLabel: false }
 )
 
 const emit = defineEmits<{ (e: 'update:modelValue', v: string): void }>()
@@ -44,9 +47,19 @@ function place() {
   const gap = 8
   const margin = 8
 
+  // 小窗（560×320）里菜单可能比视口还高：按可用高度收敛列表，
+  // 否则底部会被窗口裁掉一半。
+  const avail = window.innerHeight - margin * 2
+  const listEl = m.querySelector<HTMLElement>('.langpick__list')
+  if (listEl) {
+    const chromeH = mh - listEl.offsetHeight // 搜索框 + padding
+    listEl.style.maxHeight = `${Math.max(90, Math.min(listEl.offsetHeight, avail - chromeH - gap))}px`
+  }
+
   // 下方放得下就往下，否则翻到上方
+  const effH = m.offsetHeight
   const top =
-    window.innerHeight - r.bottom > mh + gap ? r.bottom + gap : Math.max(margin, r.top - mh - gap)
+    window.innerHeight - r.bottom > effH + gap ? r.bottom + gap : Math.max(margin, r.top - effH - gap)
 
   let left = props.align === 'right' ? r.right - mw : r.left
   left = Math.min(Math.max(margin, left), window.innerWidth - mw - margin)
@@ -102,7 +115,13 @@ onUnmounted(() => {
 
 <template>
   <span ref="triggerEl" class="langpick">
-    <button class="langpick__trigger" title="展开更多语言" @click="open = !open">
+    <button
+      class="langpick__trigger"
+      :class="{ 'langpick__trigger--labeled': showLabel }"
+      :title="showLabel ? '切换目标语言' : '展开更多语言'"
+      @click="open = !open"
+    >
+      <span v-if="showLabel" class="langpick__label">{{ modelValue }}</span>
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
         <path d="M6 9l6 6 6-6" />
       </svg>
@@ -159,15 +178,42 @@ onUnmounted(() => {
   color: var(--c-text);
 }
 
+/* 带文本标签的触发器（小窗 / 划词弹窗）：胶囊形而不是圆钮 */
+.langpick__trigger--labeled {
+  width: auto;
+  height: auto;
+  gap: 4px;
+  padding: 2px 6px 2px 8px;
+  border-radius: 6px;
+  background: var(--c-surface-alt);
+  border: 1px solid var(--c-border-soft);
+}
+
+.langpick__trigger--labeled svg {
+  width: 12px;
+  height: 12px;
+}
+
+.langpick__label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--c-primary);
+  max-width: 90px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .langpick__menu {
   position: fixed;
   z-index: 200;
   width: 260px;
   padding: 10px;
-  background: var(--c-surface);
-  border: 1px solid var(--c-border-soft);
-  border-radius: var(--r-lg);
-  box-shadow: var(--shadow-float);
+  background: var(--popover-bg);
+  backdrop-filter: blur(20px);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-md);
+  box-shadow: var(--popover-shadow);
   box-sizing: border-box;
 }
 
@@ -185,7 +231,7 @@ onUnmounted(() => {
 }
 
 .langpick__search:focus {
-  background: #fff;
+  background: var(--c-surface);
   box-shadow: 0 0 0 2px var(--c-primary);
 }
 

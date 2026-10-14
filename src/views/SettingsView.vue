@@ -1,13 +1,29 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
+import type { Component } from 'vue'
 import { listen } from '@tauri-apps/api/event'
+import { BookOpen, Info, Palette, Settings as SettingsIcon, Trash2, X, Zap } from '@lucide/vue'
 import { api, err, toast } from '../api'
-import { activeBackend, saveSettings, settings } from '../composables/useAppState'
+import { activeBackend, saveSettings, settings, tab } from '../composables/useAppState'
+import { setThemeMode, useTheme } from '../composables/useTheme'
 import type { Backend } from '../types'
+
+const { themeMode } = useTheme()
 
 const testing = ref('')
 const testResult = ref<Record<string, string>>({})
 const keyInputs = ref<Record<string, string>>({})
+
+// ---------- 侧栏分区 ----------
+type Section = 'window' | 'engine' | 'appearance' | 'about'
+const section = ref<Section>('window')
+
+const SECTIONS: { key: Section; label: string; icon: Component }[] = [
+  { key: 'window', label: '窗口唤起与热键', icon: Zap },
+  { key: 'engine', label: '翻译引擎与模型', icon: SettingsIcon },
+  { key: 'appearance', label: '外观', icon: Palette },
+  { key: 'about', label: '关于与更新', icon: Info }
+]
 
 // ---------- 托盘 / 热键 / 自启 ----------
 const autostart = ref(false)
@@ -83,6 +99,11 @@ function onRecordKey(e: KeyboardEvent) {
   if (!accel) return
   recording.value = null
   applyHotkey(which, accel)
+}
+
+/** 录制胶囊直接展示的键帽序列：Ctrl+Shift+S → [Ctrl, Shift, S] */
+function hotkeyParts(accel: string): string[] {
+  return accel ? accel.split('+') : []
 }
 
 /**
@@ -183,9 +204,9 @@ async function test(b: Backend) {
   testResult.value = { ...testResult.value, [b.id]: '' }
   try {
     const models = await api.testBackend(b)
-    testResult.value = { ...testResult.value, [b.id]: `✓ 在线 · 模型 ${models.join(', ')}` }
+    testResult.value = { ...testResult.value, [b.id]: `在线 · 模型 ${models.join(', ')}` }
   } catch (e) {
-    testResult.value = { ...testResult.value, [b.id]: `✗ ${String(e).slice(0, 90)}` }
+    testResult.value = { ...testResult.value, [b.id]: String(e).slice(0, 90) }
   } finally {
     testing.value = ''
   }
@@ -221,405 +242,859 @@ async function removeBackend(b: Backend) {
   await saveSettings()
   toast('已删除')
 }
+
+const APP_VERSION = '0.1.0'
 </script>
 
 <template>
   <div class="settings" :class="{ 'settings--recording': recording }" @keydown="onRecordKey">
-    <!-- 托盘与全局热键 -->
-    <section class="card tray-card">
-      <h3 class="card__title">窗口唤起与系统集成</h3>
+    <!-- 左侧分区导航 -->
+    <aside class="settings-sidebar">
+      <div class="sidebar-title">偏好设置</div>
+      <button
+        v-for="s in SECTIONS"
+        :key="s.key"
+        class="sidebar-item"
+        :class="{ 'sidebar-item--active': section === s.key }"
+        @click="section = s.key"
+      >
+        <component :is="s.icon" :size="15" class="sidebar-item__icon" />
+        <span>{{ s.label }}</span>
+      </button>
+      <button class="sidebar-item" @click="tab = 'glossary'">
+        <BookOpen :size="15" class="sidebar-item__icon" />
+        <span>术语库管理 ↗</span>
+      </button>
+    </aside>
 
-      <label class="row">
-        <span class="row__label">
-          关闭时最小化到托盘
-          <em class="row__hint">关窗后进程仍在，全局热键才会继续有效；从托盘菜单「退出」才真正结束</em>
-        </span>
-        <input
-          v-model="settings.close_to_tray"
-          class="switch"
-          type="checkbox"
-          @change="saveSettings()"
-        />
-      </label>
+    <!-- 右侧内容区 -->
+    <div class="settings-content">
+      <!-- ========== 分区 1：窗口唤起与热键 ========== -->
+      <template v-if="section === 'window'">
+        <div class="section-header">
+          <h2>窗口唤起与系统集成</h2>
+          <p>管理后台常驻行为、全局快捷键注册以及系统级划词监听策略</p>
+        </div>
 
-      <label class="row">
-        <span class="row__label">
-          开机自动启动
-          <em class="row__hint">注册到系统启动项，后台常驻以便随时唤起</em>
-        </span>
-        <input
-          class="switch"
-          type="checkbox"
-          :checked="autostart"
-          @change="toggleAutostart(($event.target as HTMLInputElement).checked)"
-        />
-      </label>
+        <div class="settings-card">
+          <div class="setting-row">
+            <div class="setting-info">
+              <div class="setting-title">关闭时最小化到系统托盘</div>
+              <div class="setting-desc">关闭主窗口后进程保持后台常驻，确保全局热键随时可用；从托盘菜单「退出」才真正结束</div>
+            </div>
+            <label class="switch">
+              <input
+                v-model="settings.close_to_tray"
+                type="checkbox"
+                @change="saveSettings()"
+              />
+              <span class="slider" />
+            </label>
+          </div>
 
-      <div v-for="r in HOTKEY_ROWS" :key="r.key" class="hk">
-        <div class="row">
-          <span class="row__label">
-            {{ r.label }}
-            <em class="row__hint">
-              {{ recording === r.key ? '按下想要的组合键，Esc 取消' : r.hint }}
-            </em>
-          </span>
-          <div class="hotkey">
-            <input v-model="hotkeyInputs[r.key]" class="input input--sm hotkey__input" readonly />
-            <button class="btn btn--sm" @click="recording = recording === r.key ? null : r.key">
-              {{ recording === r.key ? '取消' : '录制' }}
+          <div class="setting-row">
+            <div class="setting-info">
+              <div class="setting-title">开机自动启动</div>
+              <div class="setting-desc">注册到操作系统启动项，登录后静默常驻后台</div>
+            </div>
+            <label class="switch">
+              <input
+                type="checkbox"
+                :checked="autostart"
+                @change="toggleAutostart(($event.target as HTMLInputElement).checked)"
+              />
+              <span class="slider" />
+            </label>
+          </div>
+        </div>
+
+        <!-- 热键 -->
+        <div class="settings-card">
+          <div v-for="r in HOTKEY_ROWS" :key="r.key" class="setting-row">
+            <div class="setting-info">
+              <div class="setting-title">
+                {{ r.label }}
+                <span
+                  v-if="hotkeyStates[r.key]?.ok && hotkeyInputs[r.key]"
+                  class="badge-status"
+                  >已注册</span
+                >
+                <span
+                  v-else-if="hotkeyStates[r.key] && !hotkeyStates[r.key]?.ok"
+                  class="badge-status badge-status--bad"
+                  >未生效</span
+                >
+              </div>
+              <div class="setting-desc">
+                {{ recording === r.key ? '按下想要的组合键，Esc 取消' : r.hint }}
+              </div>
+            </div>
+            <div class="hotkey-control">
+              <button
+                class="hotkey-recorder"
+                :class="{ 'hotkey-recorder--recording': recording === r.key }"
+                title="点击后直接按下新组合键录制"
+                @click="recording = recording === r.key ? null : r.key"
+              >
+                <template v-if="recording === r.key">
+                  <span class="recording-hint">请按下组合键…</span>
+                </template>
+                <template v-else-if="hotkeyParts(hotkeyInputs[r.key]).length">
+                  <template v-for="(k, i) in hotkeyParts(hotkeyInputs[r.key])" :key="i">
+                    <kbd class="kbd-key">{{ k }}</kbd>
+                    <span v-if="i < hotkeyParts(hotkeyInputs[r.key]).length - 1" class="kbd-plus">+</span>
+                  </template>
+                </template>
+                <span v-else class="recording-hint">未设置</span>
+              </button>
+              <button
+                v-if="hotkeyInputs[r.key] && recording !== r.key"
+                class="icon-btn"
+                title="清除该热键"
+                @click="applyHotkey(r.key, '')"
+              >
+                <X :size="13" />
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 划词翻译 -->
+        <div class="settings-card">
+          <div class="setting-row">
+            <div class="setting-info">
+              <div class="setting-title">
+                划词翻译（选中后自动弹窗）
+                <span v-if="selStatus?.enabled && !selStatus.error" class="badge-status">
+                  <span class="badge-dot" /> 监听运行中
+                </span>
+              </div>
+              <div class="setting-desc">
+                监听全局鼠标，选中文本即在光标处弹出译文。仅 Windows 与 Linux(X11) 可用；Wayland 下无法模拟按键，会启动失败
+              </div>
+            </div>
+            <label class="switch">
+              <input
+                type="checkbox"
+                :checked="settings.selection_enabled"
+                @change="toggleSelection(($event.target as HTMLInputElement).checked)"
+              />
+              <span class="slider" />
+            </label>
+          </div>
+
+          <div class="setting-row">
+            <div class="setting-info">
+              <div class="setting-title">划词触发修饰键</div>
+              <div class="setting-desc">
+                抓取要借剪贴板中转，期间剪贴板会被短暂替换。建议改成按住 Ctrl，用拖选 + Ctrl 才触发。
+              </div>
+            </div>
+            <select
+              v-model="settings.selection_modifier"
+              class="custom-select"
+              @change="saveSettings()"
+            >
+              <option value="">不要求</option>
+              <option value="ctrl">按住 Ctrl + 拖选（推荐）</option>
+              <option value="alt">按住 Alt + 拖选</option>
+              <option value="shift">按住 Shift + 拖选</option>
+            </select>
+          </div>
+
+          <p v-if="selStatus?.error" class="state-msg state-msg--bad">
+            划词监听启动失败：{{ selStatus.error }}（Wayland 下属预期）
+          </p>
+        </div>
+      </template>
+
+      <!-- ========== 分区 2：翻译引擎与模型 ========== -->
+      <template v-else-if="section === 'engine'">
+        <div class="section-header">
+          <h2>翻译引擎与模型</h2>
+          <p>配置 OpenAI 兼容后端、模型参数与凭据；可随时在主界面底栏切换</p>
+        </div>
+
+        <div class="settings-card">
+          <div class="setting-row">
+            <div class="setting-info">
+              <div class="setting-title">采样温度</div>
+              <div class="setting-desc">翻译任务需要稳定输出，默认 0.1（官方推荐值）</div>
+            </div>
+            <input
+              v-model.number="settings.temperature"
+              class="num-input"
+              type="number"
+              min="0"
+              max="1"
+              step="0.1"
+              @change="saveSettings()"
+            />
+          </div>
+          <div class="setting-row">
+            <div class="setting-info">
+              <div class="setting-title">请求超时（秒）</div>
+              <div class="setting-desc">单次翻译请求的最长等待时间</div>
+            </div>
+            <input
+              v-model.number="settings.timeout_secs"
+              class="num-input"
+              type="number"
+              min="30"
+              step="30"
+              @change="saveSettings()"
+            />
+          </div>
+        </div>
+
+        <div v-for="b in settings.backends" :key="b.id" class="settings-card backend" :class="{ 'backend--active': b.id === settings.active_id }">
+          <!-- 头部：左=名称+状态标签，右=操作（测试为强调钮，删除为轻量图标钮） -->
+          <div class="backend__head">
+            <input v-model="b.name" class="backend__name" @change="saveSettings()" />
+            <span v-if="b.id === settings.active_id" class="backend__live-tag">
+              <span class="badge-dot" /> 当前使用
+            </span>
+            <span class="grow" />
+            <button class="btn btn--primary btn--sm" :disabled="testing === b.id" @click="test(b)">
+              {{ testing === b.id ? '测试中…' : '测试连接' }}
             </button>
-            <button class="btn btn--sm" @click="applyHotkey(r.key, hotkeyInputs[r.key].trim())">
-              应用
-            </button>
-            <button class="btn btn--sm" title="取消该热键" @click="applyHotkey(r.key, '')">
-              清除
+            <button class="icon-btn icon-btn--danger" title="删除该后端" @click="removeBackend(b)">
+              <Trash2 :size="14" />
             </button>
           </div>
-        </div>
-        <p
-          v-if="hotkeyStates[r.key]"
-          class="hotkey__state"
-          :class="hotkeyStates[r.key]?.ok ? 'ok' : 'bad'"
-        >
-          {{ hotkeyStates[r.key]?.ok ? '✓' : '✗' }} {{ hotkeyStates[r.key]?.message }}
-        </p>
-      </div>
 
-      <label class="row">
-        <span class="row__label">
-          划词翻译（选中后自动弹窗）
-          <em class="row__hint">
-            监听全局鼠标，选中文本即在光标处弹出译文。仅 Windows 与 Linux(X11) 可用；
-            Wayland 下无法模拟按键，会启动失败
-          </em>
-        </span>
-        <input
-          class="switch"
-          type="checkbox"
-          :checked="settings.selection_enabled"
-          @change="toggleSelection(($event.target as HTMLInputElement).checked)"
-        />
-      </label>
+          <!-- 字段区：两栏 + API Key 行，间距统一走卡片内部节奏 -->
+          <div class="backend__body">
+            <div class="backend__row">
+              <div class="backend__field backend__field--url">
+                <label class="backend__label">Base URL</label>
+                <input v-model="b.base_url" class="input" placeholder="http://127.0.0.1:8080" @change="saveSettings()" />
+              </div>
+              <div class="backend__field">
+                <label class="backend__label">模型名</label>
+                <input v-model="b.model" class="input" placeholder="模型名，如 gpt-4o-mini" @change="saveSettings()" />
+              </div>
+            </div>
 
-      <label class="row">
-        <span class="row__label">
-          划词触发修饰键
-          <em class="row__hint"
-            >不要求修饰键时，系统里的**每一次左键点击**都会触发一次划词抓取，而抓取靠的是
-            借剪贴板中转（写哨兵 → 模拟 Ctrl+C → 读回），期间剪贴板会被短暂替换。
-            建议改成按住 Ctrl，用拖选 + Ctrl 才触发。</em
-          >
-        </span>
-        <select
-          v-model="settings.selection_modifier"
-          class="input select--mod"
-          @change="saveSettings()"
-        >
-          <option value="">不要求</option>
-          <option value="ctrl">按住 Ctrl</option>
-          <option value="alt">按住 Alt</option>
-          <option value="shift">按住 Shift</option>
-        </select>
-      </label>
-
-      <p v-if="selStatus" class="hotkey__state" :class="selStatus.error ? 'bad' : 'ok'">
-        <template v-if="selStatus.error">
-          ✗ 划词监听启动失败：{{ selStatus.error }}（Wayland 下属预期）
-        </template>
-        <template v-else-if="selStatus.enabled">
-          ✓ 划词监听已启动{{ selStatus.started ? '' : '，等待线程就绪' }}
-        </template>
-        <template v-else>未启用划词翻译</template>
-      </p>
-
-      <p class="tray-card__note">
-        托盘图标：左键单击直接唤出窗口，右键菜单提供「显示窗口 / 退出」。
-      </p>
-    </section>
-
-    <div class="settings__head">
-      <h2>后端配置</h2>
-      <div class="settings__global">
-        <label class="inline">
-          温度
-          <input v-model.number="settings.temperature" class="input input--sm" type="number" min="0" max="1" step="0.1" @change="saveSettings()" />
-        </label>
-        <label class="inline">
-          超时(秒)
-          <input v-model.number="settings.timeout_secs" class="input input--sm" type="number" min="30" step="30" @change="saveSettings()" />
-        </label>
-        <button class="btn btn--sm" @click="saveSettings()">保存全部</button>
-      </div>
-    </div>
-
-    <div class="backends">
-      <div v-for="b in settings.backends" :key="b.id" class="card backend" :class="{ 'backend--active': b.id === settings.active_id }">
-        <div class="backend__head">
-          <input v-model="b.name" class="input backend__name" @change="saveSettings()" />
-          <span v-if="b.id === settings.active_id" class="tag tag--success">当前使用</span>
-          <button class="btn btn--sm" :disabled="testing === b.id" @click="test(b)">
-            {{ testing === b.id ? '测试中…' : '测试连接' }}
-          </button>
-          <button class="btn btn--sm btn--danger" @click="removeBackend(b)">删除</button>
-        </div>
-
-        <div class="backend__row">
-          <div class="field backend__url">
-            <label class="label">Base URL</label>
-            <input v-model="b.base_url" class="input" placeholder="http://127.0.0.1:8080" @change="saveSettings()" />
+            <div class="backend__field">
+              <label class="backend__label">
+                API Key
+                <span v-if="b.has_api_key" class="backend__key-tag backend__key-tag--saved">已保存到系统凭据库</span>
+                <span v-else class="backend__key-tag">未设置（本地服务通常不需要）</span>
+              </label>
+              <div class="backend__key">
+                <input v-model="keyInputs[b.id]" class="input" type="password" placeholder="留空并保存 = 清除 key" />
+                <button class="btn btn--sm" @click="saveKey(b)">保存 Key</button>
+              </div>
+            </div>
           </div>
-          <div class="field backend__model">
-            <label class="label">模型名</label>
-            <input v-model="b.model" class="input" placeholder="hy-mt2" @change="saveSettings()" />
+
+          <p v-if="testResult[b.id]" class="backend__result">{{ testResult[b.id] }}</p>
+        </div>
+
+        <button class="btn btn--ghost backend__add" @click="addBackend">+ 添加后端</button>
+
+        <div class="settings-card note">
+          <div class="setting-title">说明</div>
+          <ul>
+            <li>后端需提供 OpenAI 兼容接口（<code>/v1/chat/completions</code>）。</li>
+            <li>任意 OpenAI 兼容服务均可：云端 API（DeepSeek、OpenAI、腾讯混元等）、本地 llama.cpp、Ollama、vLLM 或自建网关。</li>
+            <li>Base URL 可填根地址、<code>/v1</code> 或完整 <code>/v1/chat/completions</code>，会自动归一。</li>
+            <li>API key 通过系统凭据管理器存储，不写入配置文件。</li>
+            <li v-if="activeBackend">
+              当前后端：<strong>{{ activeBackend.name }}</strong> — {{ activeBackend.base_url }}
+            </li>
+          </ul>
+        </div>
+      </template>
+
+      <!-- ========== 分区 3：外观 ========== -->
+      <template v-else-if="section === 'appearance'">
+        <div class="section-header">
+          <h2>外观</h2>
+          <p>深浅主题跟随系统或手动固定；三个窗口（主窗口 / 划词弹窗 / 小窗）同步切换</p>
+        </div>
+
+        <div class="settings-card">
+          <div class="setting-row">
+            <div class="setting-info">
+              <div class="setting-title">主题模式</div>
+              <div class="setting-desc">选择「跟随系统」时，切换系统深浅色会实时生效</div>
+            </div>
+            <div class="theme-picker">
+              <button
+                v-for="m in ['auto', 'light', 'dark']"
+                :key="m"
+                class="theme-pill"
+                :class="{ 'theme-pill--active': themeMode === m }"
+                @click="setThemeMode(m as 'auto' | 'light' | 'dark')"
+              >
+                {{ m === 'auto' ? '跟随系统' : m === 'light' ? '☀️ 浅色' : '🌙 深色' }}
+              </button>
+            </div>
           </div>
         </div>
+      </template>
 
-        <div class="field">
-          <label class="label">
-            API Key
-            <span v-if="b.has_api_key" class="tag tag--success">已保存到系统凭据库</span>
-            <span v-else class="tag">未设置（本地服务通常不需要）</span>
-          </label>
-          <div class="backend__key">
-            <input v-model="keyInputs[b.id]" class="input" type="password" placeholder="留空并保存 = 清除 key" />
-            <button class="btn btn--sm" @click="saveKey(b)">保存 Key</button>
-          </div>
+      <!-- ========== 分区 4：关于 ========== -->
+      <template v-else>
+        <div class="section-header">
+          <h2>关于与更新</h2>
+          <p>Zephyr Translator — 可接入任意 OpenAI 兼容端点的跨端桌面翻译工具</p>
         </div>
 
-        <p v-if="testResult[b.id]" class="backend__result">{{ testResult[b.id] }}</p>
-      </div>
-    </div>
-
-    <button class="btn" @click="addBackend">+ 添加后端</button>
-
-    <div class="card note">
-      <h3 class="card__title">说明</h3>
-      <ul>
-        <li>后端需提供 OpenAI 兼容接口（<code>/v1/chat/completions</code>）。</li>
-        <li>本地 llama.cpp 服务地址：<code>http://127.0.0.1:8080</code>，无需 API key。</li>
-        <li>API key 通过系统凭据管理器存储，不写入配置文件。</li>
-        <li>温度默认 0.1：翻译任务需要稳定输出，官方脚本即用此值。</li>
-      </ul>
-      <p v-if="activeBackend" class="note__current">
-        当前后端：<strong>{{ activeBackend.name }}</strong> — {{ activeBackend.base_url }}
-      </p>
+        <div class="settings-card about-grid">
+          <div class="about-item">
+            <span class="about-label">版本</span>
+            <span>v{{ APP_VERSION }}</span>
+          </div>
+          <div class="about-item">
+            <span class="about-label">当前引擎</span>
+            <span>{{ activeBackend ? `${activeBackend.name}（${activeBackend.model || '未指定模型'}）` : '未配置' }}</span>
+          </div>
+          <div class="about-item">
+            <span class="about-label">配置目录</span>
+            <span class="about-mono">%APPDATA%/zephyr-translator</span>
+          </div>
+        </div>
+      </template>
     </div>
   </div>
 </template>
 
 <style scoped>
-
-/* ---------- 托盘 / 热键 / 自启 ---------- */
-
-.tray-card {
-  margin-bottom: var(--sp-5);
+.settings {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  height: 100%;
+  min-height: 0;
+  background: var(--surface-secondary);
+  overflow: hidden;
 }
 
-.row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--sp-4);
-  padding: var(--sp-3) 0;
-  border-bottom: 1px solid var(--c-border-soft);
-}
-
-.row:last-of-type {
-  border-bottom: none;
-}
-
-.row__label {
+/* ---------- 侧栏 ---------- */
+.settings-sidebar {
+  background: var(--surface-primary);
+  border-right: 1px solid var(--border-subtle);
+  padding: 16px 10px;
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  font-size: 14px;
-  color: var(--c-text);
+  gap: 4px;
+  overflow-y: auto;
 }
 
-.row__hint {
-  font-size: 12px;
-  font-style: normal;
-  color: var(--c-text-tertiary);
+.sidebar-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  padding: 4px 10px 10px;
 }
 
-.switch {
-  width: 38px;
-  height: 20px;
-  flex-shrink: 0;
+.sidebar-item {
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  text-align: left;
   cursor: pointer;
-  accent-color: var(--c-primary);
-}
-
-.hotkey {
   display: flex;
   align-items: center;
-  gap: var(--sp-2);
-  flex-shrink: 0;
+  gap: 8px;
+  transition: all 0.15s;
 }
 
-.hotkey__input {
-  width: 150px;
-  font-family: var(--font-mono);
-  font-size: 12px;
+.sidebar-item__icon {
+  width: 16px;
   text-align: center;
-}
-
-.select--mod {
-  width: 130px;
   flex-shrink: 0;
 }
 
-.hotkey__state {
-  margin: var(--sp-3) 0 0;
-  font-size: 12px;
+.sidebar-item:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
 }
 
-/* 每个热键一个分组：分隔线挪到分组上，行内那条去掉，免得出现双线 */
-.hk {
-  border-bottom: 1px solid var(--c-border-soft);
+.sidebar-item--active {
+  background: var(--surface-active);
+  color: var(--accent-primary);
+  font-weight: 500;
 }
 
-.hk:last-of-type {
-  border-bottom: none;
-}
-
-.hk .row {
-  border-bottom: none;
-}
-
-.hotkey__state.ok {
-  color: var(--c-success);
-}
-
-.hotkey__state.bad {
-  color: var(--c-danger);
-}
-
-.tray-card__note {
-  margin: var(--sp-3) 0 0;
-  font-size: 12px;
-  color: var(--c-text-tertiary);
-}
-
-/* 录制热键时吃掉输入框焦点，避免按键被输入框消费 */
-.settings--recording {
-  user-select: none;
-}
-.settings {
-  max-width: 860px;
-  padding: var(--sp-4) var(--sp-5);
+/* ---------- 内容区 ---------- */
+.settings-content {
+  padding: 24px 32px;
   overflow-y: auto;
-  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  /* 高度不够时滚动而不是压缩卡片——压缩会把卡片下半行裁掉 */
+  align-content: start;
 }
 
-.settings__head {
+.settings-content > * {
+  flex-shrink: 0;
+}
+
+.section-header h2 {
+  margin: 0 0 4px;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.section-header p {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+
+.settings-card {
+  background: var(--surface-primary);
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.setting-row {
+  padding: 14px 20px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: var(--sp-4);
-  flex-wrap: wrap;
-  gap: var(--sp-2);
+  gap: 24px;
+  border-bottom: 1px solid var(--border-subtle);
 }
 
-.settings__head h2 {
-  margin: 0;
-  font-size: 18px;
+.setting-row:last-child {
+  border-bottom: none;
 }
 
-.settings__global {
+.setting-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.setting-title {
+  font-size: 13.5px;
+  font-weight: 500;
   display: flex;
   align-items: center;
-  gap: var(--sp-3);
+  gap: 8px;
+  margin-bottom: 4px;
 }
 
-.inline {
+.setting-desc {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.badge-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 1px 7px;
+  border-radius: var(--r-pill);
+  background: color-mix(in srgb, var(--status-online) 12%, transparent);
+  color: var(--status-online);
+  border: 1px solid color-mix(in srgb, var(--status-online) 25%, transparent);
+}
+
+.badge-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 5px currentColor;
+}
+
+.badge-status--bad {
+  background: var(--status-danger-bg);
+  color: var(--status-danger);
+  border-color: color-mix(in srgb, var(--status-danger) 25%, transparent);
+}
+
+/* CSS 开关（原型同款） */
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 40px;
+  height: 22px;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+
+.switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.slider {
+  position: absolute;
+  cursor: pointer;
+  inset: 0;
+  background-color: var(--surface-tertiary);
+  border: 1px solid var(--border-subtle);
+  transition: 0.2s;
+  border-radius: var(--r-pill);
+}
+
+.slider:before {
+  position: absolute;
+  content: '';
+  height: 16px;
+  width: 16px;
+  left: 2px;
+  bottom: 2px;
+  background-color: var(--text-secondary);
+  transition: 0.2s;
+  border-radius: 50%;
+}
+
+.switch input:checked + .slider {
+  background-color: var(--accent-primary);
+  border-color: var(--accent-primary);
+}
+
+.switch input:checked + .slider:before {
+  transform: translateX(18px);
+  background-color: #ffffff;
+}
+
+/* 热键录制器（键帽样式） */
+.hotkey-control {
   display: flex;
   align-items: center;
   gap: 6px;
+  flex-shrink: 0;
+}
+
+.hotkey-recorder {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 12px;
+  border-radius: 8px;
+  background: var(--surface-secondary);
+  border: 1px solid var(--border-subtle);
+  cursor: pointer;
+  transition: all 0.15s;
+  min-width: 130px;
+  justify-content: center;
+  font-family: inherit;
+}
+
+.hotkey-recorder:hover {
+  border-color: var(--border-focus);
+  background: var(--surface-hover);
+}
+
+.hotkey-recorder--recording {
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+  background: var(--surface-active);
+}
+
+.recording-hint {
+  font-size: 12px;
+  color: var(--accent-primary);
+}
+
+.kbd-plus {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.icon-btn {
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.15s;
+  font-size: 12px;
+}
+
+.icon-btn:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.custom-select {
+  appearance: none;
+  background: var(--surface-secondary);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  padding: 7px 30px 7px 12px;
+  border-radius: 8px;
+  font-family: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  outline: none;
+  flex-shrink: 0;
+}
+
+.num-input {
+  width: 90px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: var(--surface-secondary);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  font-family: inherit;
   font-size: 13px;
-  color: var(--c-text-secondary);
+  outline: none;
+  text-align: center;
+  flex-shrink: 0;
 }
 
-.input--sm {
-  width: 80px;
+.num-input:focus {
+  border-color: var(--border-focus);
 }
 
-.backends {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-3);
-  margin-bottom: var(--sp-3);
+.state-msg {
+  margin: 0;
+  padding: 10px 20px;
+  font-size: 12px;
+}
+
+.state-msg--bad {
+  color: var(--status-danger);
+  background: var(--status-danger-bg);
+}
+
+/* ---------- 引擎分区 ---------- */
+.grow {
+  flex: 1;
 }
 
 .backend--active {
-  border-color: var(--c-primary);
-  box-shadow: 0 0 0 1px var(--c-primary);
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 1px var(--border-focus);
 }
 
+/* 头部：名称与状态居左，操作居右，统一基线 */
 .backend__head {
   display: flex;
   align-items: center;
-  gap: var(--sp-2);
-  margin-bottom: var(--sp-3);
+  gap: 10px;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .backend__name {
-  flex: 1;
+  flex: 0 1 260px;
+  min-width: 0;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 14px;
   font-weight: 600;
+  outline: none;
+  transition: all 0.15s;
+}
+
+.backend__name:hover {
+  border-color: var(--border-subtle);
+}
+
+.backend__name:focus {
+  border-color: var(--border-focus);
+  background: var(--surface-secondary);
+}
+
+/* 「当前使用」状态标签：绿色呼吸点 + 文字 */
+.backend__live-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: var(--r-pill);
+  background: color-mix(in srgb, var(--status-online) 10%, transparent);
+  color: var(--status-online);
+  white-space: nowrap;
+}
+
+/* 字段区：卡片内统一 16px/12px 节奏，不再借 base 的 .field 边距 */
+.backend__body {
+  padding: 16px 20px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
 .backend__row {
   display: flex;
-  gap: var(--sp-3);
+  gap: 12px;
 }
 
-.backend__url {
-  flex: 2;
-}
-
-.backend__model {
+.backend__field {
   flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.backend__field--url {
+  flex: 1.8;
+}
+
+.backend__label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.backend__key-tag {
+  font-size: 11px;
+  font-weight: 400;
+  padding: 1px 7px;
+  border-radius: var(--r-pill);
+  background: var(--surface-tertiary);
+  color: var(--text-muted);
+  border: 1px solid var(--border-subtle);
+}
+
+.backend__key-tag--saved {
+  background: color-mix(in srgb, var(--status-online) 10%, transparent);
+  border-color: color-mix(in srgb, var(--status-online) 25%, transparent);
+  color: var(--status-online);
 }
 
 .backend__key {
   display: flex;
-  gap: var(--sp-2);
+  gap: 8px;
 }
 
 .backend__result {
   margin: 0;
-  padding: 6px 10px;
+  padding: 10px 20px 14px;
   font-size: 12px;
   font-family: var(--font-mono);
-  background: var(--c-surface-alt);
-  border-radius: var(--r-sm);
-  color: var(--c-text-secondary);
+  color: var(--text-secondary);
+  word-break: break-all;
+  background: var(--surface-secondary);
+  border-top: 1px solid var(--border-subtle);
 }
 
-.note {
-  margin-top: var(--sp-4);
+/* 危险图标钮：轻量，hover 才显红 */
+.icon-btn--danger:hover {
+  color: var(--status-danger);
+  background: var(--status-danger-bg);
+}
+
+.backend__add {
+  align-self: flex-start;
 }
 
 .note ul {
-  margin: 0;
-  padding-left: 20px;
-  font-size: 13px;
-  color: var(--c-text-secondary);
+  margin: 8px 0 0;
+  padding: 0 20px 14px;
+  font-size: 12.5px;
+  color: var(--text-secondary);
   line-height: 1.9;
+}
+
+.note {
+  padding-top: 14px;
+}
+
+.note .setting-title {
+  padding: 0 20px;
 }
 
 .note code {
   padding: 1px 5px;
   font-family: var(--font-mono);
   font-size: 12px;
-  background: var(--c-surface-hover);
+  background: var(--surface-hover);
   border-radius: var(--r-sm);
 }
 
-.note__current {
-  margin: var(--sp-3) 0 0;
-  padding-top: var(--sp-3);
+/* ---------- 外观分区 ---------- */
+.theme-picker {
+  display: flex;
+  gap: 4px;
+  background: var(--surface-tertiary);
+  padding: 3px;
+  border-radius: 8px;
+  border: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+
+.theme-pill {
+  padding: 5px 12px;
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+
+.theme-pill--active {
+  background: var(--surface-primary);
+  color: var(--accent-primary);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+}
+
+/* ---------- 关于分区 ---------- */
+.about-grid {
+  padding: 6px 20px;
+}
+
+.about-item {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border-subtle);
   font-size: 13px;
-  border-top: 1px solid var(--c-border-soft);
+  color: var(--text-primary);
+}
+
+.about-item:last-child {
+  border-bottom: none;
+}
+
+.about-label {
+  width: 90px;
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.about-mono {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+/* 录制热键时吃掉输入框焦点，避免按键被输入框消费 */
+.settings--recording {
+  user-select: none;
 }
 </style>

@@ -1,8 +1,8 @@
 {
-  "name": "hy-mt2-translator",
+  "name": "zephyr-translator",
   "version": "0.1.0",
   "private": true,
-  "description": "Hy-MT2 跨端翻译工具 (Vue 3 + Rust / Tauri)",
+  "description": "跨端桌面 AI 翻译工具，可接入任意 OpenAI 兼容端点 (Vue 3 + Rust / Tauri)",
   "type": "module",
   "scripts": {
     "dev": "vite",

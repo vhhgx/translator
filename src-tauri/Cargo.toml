@@ -1,12 +1,12 @@
 [package]
-name = "hy-mt2-translator"
+name = "zephyr-translator"
 version = "0.1.0"
-description = "Hy-MT2 跨端翻译工具"
+description = "跨端桌面 AI 翻译工具"
 edition = "2021"
 rust-version = "1.77"
 
 [lib]
-name = "hy_mt2_translator_lib"
+name = "zephyr_translator_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

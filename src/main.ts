@@ -3,6 +3,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import App from './App.vue'
 import MiniWindow from './views/MiniWindow.vue'
 import SelectionPopup from './views/SelectionPopup.vue'
+import { initTheme } from './composables/useTheme'
 import './styles/base.css'
 
 /**
@@ -21,6 +22,9 @@ function windowLabel(): string {
 }
 
 const label = windowLabel()
+
+// 主题要在挂载前定好，避免首帧按浅色渲染再跳深色（闪白）。
+initTheme()
 
 if (label === 'popup') {
   // 弹窗是 transparent 窗口，base.css 里 body 的不透明底色要放掉

@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use crate::error::{AppError, AppResult};
 
-const SERVICE: &str = "hy-mt2-translator";
+const SERVICE: &str = "zephyr-translator";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Backend {
@@ -71,6 +71,8 @@ fn default_hotkey_mini() -> String {
 
 impl Default for Settings {
     fn default() -> Self {
+        // 出厂预置一批 OpenAI 兼容端点，只是省去用户手填 baseurl 的功夫——
+        // 任何兼容的服务（含自建 vLLM / Ollama / 各类网关）都能再加后端。
         Self {
             backends: vec![
                 Backend {
@@ -82,9 +84,30 @@ impl Default for Settings {
                 },
                 Backend {
                     id: "tencent".into(),
-                    name: "腾讯云 Hy-MT2".into(),
+                    name: "腾讯混元 Hy-MT2".into(),
                     base_url: "https://api.hunyuan.cloud.tencent.com".into(),
                     model: "hy-mt2-pro".into(),
+                    has_api_key: false,
+                },
+                Backend {
+                    id: "deepseek".into(),
+                    name: "DeepSeek".into(),
+                    base_url: "https://api.deepseek.com".into(),
+                    model: "deepseek-chat".into(),
+                    has_api_key: false,
+                },
+                Backend {
+                    id: "openai".into(),
+                    name: "OpenAI".into(),
+                    base_url: "https://api.openai.com".into(),
+                    model: "gpt-4o-mini".into(),
+                    has_api_key: false,
+                },
+                Backend {
+                    id: "ollama".into(),
+                    name: "Ollama".into(),
+                    base_url: "http://127.0.0.1:11434".into(),
+                    model: "qwen2.5:7b".into(),
                     has_api_key: false,
                 },
             ],
@@ -103,7 +126,7 @@ impl Default for Settings {
 pub fn config_path() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("hy-mt2-translator")
+        .join("zephyr-translator")
         .join("settings.json")
 }
 

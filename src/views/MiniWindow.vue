@@ -2,23 +2,40 @@
 /**
  * 小窗模式：全局热键唤出的「输入 + 译文」轻量窗口。
  *
- * 它**不碰主窗口**——按热键就是想快速译一句，不该再弹出 960×640 的主界面。
+ * 它**不碰主窗口**——按热键就是想快速译一句，不该再弹出主界面。
  * 想进主窗口，用右上角那个按钮。
+ *
+ * 翻译行为和主窗口完全一致：输入即自动翻译，长文只改末尾时走增量翻译
+ * （见 useAutoTranslate）。Enter 不再触发翻译，只用来换行。
  *
  * 窗口是常驻的（关闭只隐藏），所以复位逻辑走 `hymt2:mini-shown` 事件，
  * 不能依赖 onMounted。
  */
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { listen } from '@tauri-apps/api/event'
-import { ArrowLeftRight, ClipboardPaste, LoaderCircle, PanelTop, X } from '@lucide/vue'
+import { emit, listen } from '@tauri-apps/api/event'
+import { getCurrentWindow } from '@tauri-apps/api/window'
+import {
+  ArrowLeftRight,
+  Check,
+  ClipboardPaste,
+  Copy,
+  LoaderCircle,
+  PanelTop,
+  Pin,
+  PinOff,
+  X
+} from '@lucide/vue'
+import LangSelect from '../components/LangSelect.vue'
 import { api, err } from '../api'
-import { buildRequest, loadMeta, meta } from '../composables/useAppState'
+import { activeBackend, buildRequest, loadMeta, meta } from '../composables/useAppState'
+import { useAutoTranslate } from '../composables/useAutoTranslate'
 
 const source = ref('')
-const result = ref('')
-const failed = ref('')
-const busy = ref(false)
+const copied = ref(false)
 const input = ref<HTMLTextAreaElement | null>(null)
+const outEl = ref<HTMLElement | null>(null)
+/** 钉住时失焦不收起，和划词弹窗同一套交互 */
+const pinned = ref(false)
 
 /** 和划词弹窗共用同一个目标语言选择，两个「快速翻译」入口方向保持一致。 */
 const LANG_KEY = 'hymt2:popup-target'
@@ -30,88 +47,74 @@ const guessTarget = (t: string) => (CJK.test(t) ? 'en' : 'zh')
 
 const langs = computed(() => meta.value.languages)
 
-const unlisten: Array<() => void> = []
-let currentJob = ''
-
-function clearListeners() {
-  unlisten.forEach((f) => f())
-  unlisten.length = 0
-}
-
-async function run() {
-  const text = source.value.trim()
-  if (!text) return
-  if (!target.value) {
-    target.value = guessTarget(text)
-    localStorage.setItem(LANG_KEY, target.value)
+/**
+ * LangSelect 以中文名收发，而 localStorage 里存的是语言代码（与划词弹窗共用）。
+ * 这里做一层双向换算，存储格式保持不变——两个「快速翻译」入口仍共享同一方向。
+ */
+const targetName = computed<string>({
+  get: () => langs.value.find(([code]) => code === target.value)?.[1] ?? '',
+  set: (name) => {
+    const code = langs.value.find(([, n]) => n === name)?.[0]
+    if (code) changeTarget(code)
   }
+})
 
-  clearListeners()
-  const jobId = `mini-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-  currentJob = jobId
-  result.value = ''
-  failed.value = ''
-  busy.value = true
+// ---------- 翻译：与主窗口共用的自动 + 增量翻译 ----------
+const {
+  result,
+  busy,
+  failed,
+  elapsed,
+  usedTerms,
+  abort,
+  clearAll,
+  onBackspace,
+  schedule,
+  watchAuto
+} = useAutoTranslate({
+    source,
+    jobPrefix: 'mini-',
+    outEl,
+    buildRequest: () => {
+      // 首次输入时还没有明确方向，先按内容猜一个
+      if (!target.value && source.value.trim()) {
+        const g = guessTarget(source.value)
+        target.value = g
+        localStorage.setItem(LANG_KEY, g)
+      }
+      return buildRequest(
+        {
+          text: source.value,
+          mode: 'basic',
+          terms: [],
+          auto_filter_terms: false,
+          style: '',
+          format_type: '',
+          context: '',
+          ignore_glossary: true
+        },
+        target.value || 'zh'
+      )
+    }
+  })
 
-  try {
-    unlisten.push(
-      await listen<{ job_id: string; text: string }>('hymt2:delta', (e) => {
-        if (e.payload.job_id !== currentJob) return
-        result.value += e.payload.text
-      })
-    )
-    unlisten.push(
-      await listen<{ job_id: string; text: string }>('hymt2:done', (e) => {
-        if (e.payload.job_id !== currentJob) return
-        result.value = e.payload.text
-        busy.value = false
-      })
-    )
-    unlisten.push(
-      await listen<{ job_id: string; message: string }>('hymt2:error', (e) => {
-        if (e.payload.job_id !== currentJob) return
-        failed.value = e.payload.message
-        busy.value = false
-      })
-    )
+// 输入即翻译
+watchAuto()
 
-    const req = buildRequest(
-      {
-        text,
-        mode: 'basic',
-        terms: [],
-        auto_filter_terms: false,
-        style: '',
-        format_type: '',
-        context: '',
-        ignore_glossary: true
-      },
-      target.value
-    )
-    await api.translateStream(req, jobId)
-  } catch (e) {
-    failed.value = String(e)
-    busy.value = false
-  }
-}
+const usedCount = computed(() => usedTerms.value.length)
 
 /** 换方向：把当前目标语言和猜测的源方向对调，顺手重译一次。 */
 function swapDirection() {
-  const next = target.value === 'zh' ? 'en' : 'zh'
-  changeTarget(next)
+  changeTarget(target.value === 'zh' ? 'en' : 'zh')
 }
 
 function changeTarget(v: string) {
   target.value = v
   localStorage.setItem(LANG_KEY, v)
-  if (source.value.trim()) run()
-}
-
-/** Enter 翻译，Shift+Enter 换行——小窗里没有按钮可点，键盘就是主操作。 */
-function onKeydown(e: KeyboardEvent) {
-  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
-    e.preventDefault()
-    run()
+  // 换语言 = 另一次翻译：中断当前流立刻重译
+  if (source.value.trim()) {
+    abort()
+    schedule()
   }
 }
 
@@ -121,8 +124,29 @@ async function pasteFromClipboard() {
     if (!t.trim()) return
     source.value = t
     focusInput()
-    run()
+    schedule()
   } catch (e) {
+    err(e)
+  }
+}
+
+async function copyResult() {
+  if (!result.value) return
+  try {
+    await api.copyText(result.value)
+    copied.value = true
+    window.setTimeout(() => (copied.value = false), 1300)
+  } catch (e) {
+    err(e)
+  }
+}
+
+async function togglePin() {
+  pinned.value = !pinned.value
+  try {
+    await api.setMiniPinned(pinned.value)
+  } catch (e) {
+    pinned.value = !pinned.value
     err(e)
   }
 }
@@ -135,7 +159,26 @@ function focusInput() {
   el.select()
 }
 
+/**
+ * 在主窗口中打开，并把当前原文/译文带过去。
+ *
+ * 必须走 Tauri 事件：三个窗口是各自独立的 webview，`window.dispatchEvent`
+ * 只在本窗口有效，主窗口根本收不到（localStorage 那条路要等主窗口重新
+ * 挂载才读，而它是常驻的）。
+ */
 async function openMain() {
+  if (source.value.trim() || result.value) {
+    try {
+      await emit('hymt2:reuse', {
+        source: source.value,
+        translation: result.value,
+        target_lang: target.value || 'zh',
+        mode: 'basic'
+      })
+    } catch {
+      /* 浏览器预览没有 IPC */
+    }
+  }
   try {
     await api.showWindow()
   } catch (e) {
@@ -145,9 +188,21 @@ async function openMain() {
 }
 
 async function close() {
-  clearListeners()
+  // 收起即解除钉住，否则下次热键唤出还是钉住态
+  pinned.value = false
+  abort()
   try {
     await api.hideMini()
+  } catch {
+    /* 浏览器预览没有 IPC */
+  }
+}
+
+/** 头部空白处拖拽移动小窗。 */
+function startDrag(e: MouseEvent) {
+  if ((e.target as HTMLElement).closest('button, select')) return
+  try {
+    getCurrentWindow().startDragging()
   } catch {
     /* 浏览器预览没有 IPC */
   }
@@ -157,6 +212,8 @@ async function close() {
 function onEsc(e: KeyboardEvent) {
   if (e.key === 'Escape') close()
 }
+
+const unlisten: Array<() => void> = []
 
 onMounted(async () => {
   try {
@@ -176,55 +233,88 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
-  clearListeners()
+  unlisten.forEach((f) => f())
   window.removeEventListener('keydown', onEsc)
 })
 </script>
 
 <template>
   <div class="mini">
-    <header class="mini__bar" @dblclick="openMain">
-      <span class="mini__title">快速翻译</span>
-      <select
-        class="mini__lang"
-        :value="target"
-        title="目标语言"
-        @change="changeTarget(($event.target as HTMLSelectElement).value)"
-      >
-        <option v-for="[code, name] in langs" :key="code" :value="code">{{ name }}</option>
-      </select>
-      <button class="mini__btn" title="对调中英方向" @click="swapDirection">
-        <ArrowLeftRight :size="14" />
-      </button>
+    <!-- 头部：标题 + 语言胶囊 + 钉住/粘贴/主窗/关闭 -->
+    <header class="mini__header" @mousedown="startDrag">
+      <div class="mini__header-left">
+        <span class="mini__title">快速翻译</span>
+        <div class="mini__lang-capsule" title="切换目标语言">
+          <span class="mini__lang-hint">自动检测</span>
+          <span class="mini__lang-arrow">→</span>
+          <LangSelect v-model="targetName" :options="langs" show-label />
+        </div>
+        <button class="mini__btn" title="对调中英方向" @click="swapDirection">
+          <ArrowLeftRight :size="13" />
+        </button>
+      </div>
 
       <span class="mini__spacer" />
 
+      <button
+        class="mini__btn"
+        :class="{ 'mini__btn--on': pinned }"
+        :title="pinned ? '取消钉住：点击别处将自动收起' : '钉住小窗：失焦时不自动收起'"
+        @click="togglePin"
+      >
+        <PinOff v-if="pinned" :size="13" />
+        <Pin v-else :size="13" />
+      </button>
       <button class="mini__btn" title="从剪贴板填入" @click="pasteFromClipboard">
         <ClipboardPaste :size="14" />
       </button>
       <button class="mini__btn" title="在主窗口中打开" @click="openMain">
         <PanelTop :size="14" />
       </button>
-      <button class="mini__btn" title="关闭（Esc）" @click="close">
+      <button class="mini__btn mini__btn--close" title="关闭（Esc）" @click="close">
         <X :size="14" />
       </button>
     </header>
 
-    <textarea
-      ref="input"
-      v-model="source"
-      class="mini__input"
-      placeholder="输入要翻译的内容，Enter 翻译，Shift+Enter 换行"
-      spellcheck="false"
-      @keydown="onKeydown"
-    />
+    <!-- 主体：输入卡 + 输出卡 -->
+    <div class="mini__body">
+      <div class="mini-input-card">
+        <textarea
+          ref="input"
+          v-model="source"
+          class="mini__textarea"
+          placeholder="输入或粘贴文本，输入后自动翻译…"
+          spellcheck="false"
+          @keydown.backspace="onBackspace"
+        />
+        <div class="mini-input-hints">
+          <button v-if="source" class="mini__clear" title="清空原文与译文" @click="clearAll">
+            <X :size="11" /> 清空
+          </button>
+          <span v-else><kbd class="mini-kbd">↵</kbd> 换行</span>
+          <span v-if="busy" class="mini-translating">翻译中…</span>
+          <span v-else-if="elapsed && result">{{ (elapsed / 1000).toFixed(1) }}s</span>
+        </div>
+      </div>
 
-    <div class="mini__out">
-      <p v-if="failed" class="mini__err">{{ failed }}</p>
-      <p v-else-if="!result && !busy" class="mini__hint">译文会显示在这里</p>
-      <p v-else class="mini__text">
-        {{ result }}<LoaderCircle v-if="busy" class="mini__spin" :size="13" />
-      </p>
+      <div class="mini-output-card">
+        <p v-if="failed" class="mini__err">{{ failed }}</p>
+        <p v-else-if="!result && !busy" class="mini__hint">译文会显示在这里</p>
+        <p v-else ref="outEl" class="mini__text">
+          {{ result }}<LoaderCircle v-if="busy" class="mini__spin" :size="13" />
+        </p>
+
+        <div class="mini-output-footer">
+          <span class="mini__meta">
+            <span class="status-dot" />
+            {{ activeBackend?.name ?? '本地引擎' }}<template v-if="usedCount"> · 命中术语 {{ usedCount }}</template>
+          </span>
+          <button class="mini__btn" :disabled="!result" title="复制译文" @click="copyResult">
+            <Check v-if="copied" :size="14" />
+            <Copy v-else :size="14" />
+          </button>
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -234,110 +324,227 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   height: 100%;
-  background: var(--c-bg);
+  background: var(--surface-primary);
+  overflow: hidden;
 }
 
-.mini__bar {
+/* ---------- 头部 ---------- */
+.mini__header {
+  height: 42px;
+  padding: 0 8px 0 12px;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 8px 8px 12px;
-  background: var(--c-surface-alt);
-  border-bottom: 1px solid var(--c-border-soft);
+  background: var(--surface-primary);
+  border-bottom: 1px solid var(--border-subtle);
   flex-shrink: 0;
   user-select: none;
+  cursor: grab;
+}
+
+.mini__header:active {
+  cursor: grabbing;
+}
+
+.mini__header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
 }
 
 .mini__title {
-  font-size: 12px;
+  font-size: 12.5px;
   font-weight: 600;
-  color: var(--c-text-secondary);
+  color: var(--text-primary);
+  white-space: nowrap;
 }
 
-.mini__lang {
-  font-family: inherit;
+/* 胶囊内部：LangSelect 触发器自带的底色/边框和胶囊重复，去掉 */
+.mini__lang-capsule {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  border-radius: 8px;
   font-size: 12px;
-  color: var(--c-text);
-  background: var(--c-surface);
-  border: 1px solid var(--c-border);
-  border-radius: var(--r-sm);
-  padding: 3px 6px;
-  cursor: pointer;
+}
+
+.mini__lang-capsule :deep(.langpick__trigger--labeled) {
+  background: transparent;
+  border: none;
+  padding: 1px 2px;
+}
+
+.mini__lang-hint,
+.mini__lang-arrow {
+  color: var(--text-muted);
+  white-space: nowrap;
 }
 
 .mini__spacer {
   flex: 1;
+  min-width: 0;
 }
 
 .mini__btn {
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
-  color: var(--c-text-secondary);
-  background: none;
-  border: none;
-  border-radius: var(--r-sm);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
   cursor: pointer;
-  flex-shrink: 0;
+  transition: all 0.15s;
 }
 
-.mini__btn:hover {
-  background: var(--c-surface-hover);
-  color: var(--c-text);
+.mini__btn:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--text-primary);
 }
 
-.mini__input {
+.mini__btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.mini__btn--on {
+  color: var(--accent-primary);
+  background: var(--surface-active);
+  border-color: var(--border-focus);
+}
+
+.mini__btn--close:hover {
+  background: #ef4444;
+  color: #fff;
+}
+
+/* ---------- 主体 ---------- */
+.mini__body {
+  flex: 1;
+  min-height: 0;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--surface-secondary);
+}
+
+/* 输入卡：focus-within 光环 */
+.mini-input-card {
   flex: 0 0 auto;
-  height: 34%;
-  min-height: 68px;
-  margin: 10px 12px 0;
-  padding: 8px 10px;
+  height: 40%;
+  min-height: 92px;
+  display: flex;
+  flex-direction: column;
+  padding: 7px 10px 5px;
+  background: var(--surface-secondary);
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  transition: all 0.2s;
+}
+
+.mini-input-card:focus-within {
+  background: var(--surface-primary);
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+
+.mini__textarea {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
   font-family: inherit;
-  font-size: 14px;
-  line-height: 1.6;
-  color: var(--c-text);
-  background: var(--c-surface);
-  border: 1px solid var(--c-border);
-  border-radius: var(--r-sm);
+  font-size: 13.5px;
+  line-height: 1.55;
   resize: none;
   outline: none;
 }
 
-.mini__input:focus {
-  border-color: var(--c-primary);
+.mini__textarea::placeholder {
+  color: var(--text-muted);
 }
 
-.mini__out {
+.mini-input-hints {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding-top: 3px;
+  font-size: 10.5px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.mini-translating {
+  color: var(--accent-primary);
+}
+
+/* 清空按钮：与键帽提示同一行，低调处理 */
+.mini__clear {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 5px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 10.5px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.mini__clear:hover {
+  background: var(--surface-hover);
+  color: var(--status-danger);
+}
+
+/* 输出卡 */
+.mini-output-card {
   flex: 1;
   min-height: 0;
-  overflow-y: auto;
-  margin: 10px 12px 12px;
-  padding: 8px 10px;
-  background: var(--c-surface);
-  border: 1px solid var(--c-border-soft);
-  border-radius: var(--r-sm);
+  display: flex;
+  flex-direction: column;
+  padding: 10px;
+  background: var(--surface-primary);
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  overflow: hidden;
 }
 
 .mini__text {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
   margin: 0;
-  font-size: 14px;
-  line-height: 1.65;
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--text-primary);
   white-space: pre-wrap;
   word-break: break-word;
+  user-select: text;
 }
 
 .mini__hint,
 .mini__err {
+  flex: 1;
   margin: 0;
-  font-size: 13px;
+  font-size: 12.5px;
   line-height: 1.6;
-  color: var(--c-text-tertiary);
+  color: var(--text-muted);
 }
 
 .mini__err {
-  color: var(--c-danger);
+  color: var(--status-danger);
   word-break: break-word;
 }
 
@@ -351,5 +558,27 @@ onUnmounted(() => {
   to {
     transform: rotate(360deg);
   }
+}
+
+.mini-output-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+  padding-top: 7px;
+  border-top: 1px dashed var(--border-subtle);
+  flex-shrink: 0;
+}
+
+.mini__meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 10.5px;
+  color: var(--text-muted);
+  white-space: nowrap;
 }
 </style>

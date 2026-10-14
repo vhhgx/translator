@@ -7,6 +7,7 @@
 //! 托盘用的是 Tauri 内置的 `tray-icon` feature，不额外引入 crate。
 
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -17,6 +18,17 @@ use crate::config::Settings;
 
 const MENU_SHOW: &str = "hymt2-show";
 const MENU_QUIT: &str = "hymt2-quit";
+
+/// 小窗是否被用户钉住。钉住后失焦不再自动收起，和划词弹窗同一套交互。
+static MINI_PINNED: AtomicBool = AtomicBool::new(false);
+
+pub fn set_mini_pinned(pinned: bool) {
+    MINI_PINNED.store(pinned, Ordering::Relaxed);
+}
+
+pub fn mini_pinned() -> bool {
+    MINI_PINNED.load(Ordering::Relaxed)
+}
 
 /// 热键种类。设置页有两个热键，注册结果要分开报告，不能混在一起。
 pub const HOTKEY_TOGGLE: &str = "toggle";
@@ -51,7 +63,7 @@ pub fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
 
     let mut builder = TrayIconBuilder::with_id("hymt2-tray")
         .menu(&menu)
-        .tooltip("Hy-MT2 翻译工具")
+        .tooltip("Zephyr Translator")
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
             MENU_SHOW => show_window(app),

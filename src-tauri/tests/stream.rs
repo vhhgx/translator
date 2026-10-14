@@ -2,9 +2,9 @@
 
 use std::net::ToSocketAddrs;
 
-use hy_mt2_translator_lib::client::{self, TranslateRequest};
-use hy_mt2_translator_lib::config::Backend;
-use hy_mt2_translator_lib::prompt::Mode;
+use zephyr_translator_lib::client::{self, TranslateRequest};
+use zephyr_translator_lib::config::Backend;
+use zephyr_translator_lib::prompt::Mode;
 
 fn base_url() -> String {
     std::env::var("HYMT_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".to_string())

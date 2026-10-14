@@ -58,6 +58,7 @@ export const api = {
 
   // ---------- 小窗模式 ----------
   hideMini: () => invoke<void>('hide_mini'),
+  setMiniPinned: (pinned: boolean) => invoke<void>('set_mini_pinned', { pinned }),
 
   // ---------- 划词翻译 ----------
   // 只在 Windows / Linux(X11) 可用；Wayland 下监听起不来，error 里会带原因
@@ -67,6 +68,7 @@ export const api = {
     ),
   hideSelectionPopup: () => invoke<void>('hide_selection_popup'),
   takePendingSelection: () => invoke<string | null>('take_pending_selection'),
+  setPopupPinned: (pinned: boolean) => invoke<void>('set_popup_pinned', { pinned }),
   copyText: (text: string) => invoke<void>('copy_text', { text }),
   readClipboardText: () => invoke<string>('read_clipboard_text'),
 
@@ -74,6 +76,7 @@ export const api = {
     invoke<TranslateResponse>('translate', { req, saveHistory }),
   translateStream: (req: TranslateRequest, jobId: string) =>
     invoke<void>('translate_stream', { req, jobId }),
+  detectLanguage: (text: string) => invoke<string>('detect_language', { text }),
   previewPrompt: (req: TranslateRequest) => invoke<string>('preview_prompt', { req }),
 
   glossaryGet: () => invoke<GlossaryView>('glossary_get'),
@@ -87,8 +90,15 @@ export const api = {
   glossaryImport: (name: string, terms: [string, string][], replace = false) =>
     invoke<number>('glossary_import', { name, terms, replace }),
 
-  historyList: (search?: string, limit = 100) =>
-    invoke<HistoryItem[]>('history_list', { search: search ?? null, limit }),
+  historyList: (search?: string, starred?: boolean, limit = 100) =>
+    invoke<HistoryItem[]>('history_list', {
+      search: search ?? null,
+      starred: starred ?? null,
+      limit
+    }),
+  historyCount: () => invoke<number>('history_count'),
+  historySetStarred: (id: string, starred: boolean) =>
+    invoke<void>('history_set_starred', { id, starred }),
   historyDelete: (id: string) => invoke<void>('history_delete', { id }),
   historyClear: () => invoke<void>('history_clear'),
 

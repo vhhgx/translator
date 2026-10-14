@@ -4,6 +4,9 @@
 //! (`docs/upstream/hy_translate.py::build_prompt` and
 //! `docs/upstream/translation-modes.md`). Do not "improve" the wording —
 //! the model's behaviour is tuned to these exact strings.
+//!
+//! 定位说明：这些模板对 Hy-MT2 是**经过调优**的，换成别的模型也可用，但不是
+//! 针对它们调过的。想换风格可以直接改这里，改完记得更新下面的黄金值测试。
 
 use serde::{Deserialize, Serialize};
 

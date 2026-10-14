@@ -1,4 +1,4 @@
-//! Hy-MT2 跨端翻译工具 — Tauri backend.
+//! Zephyr Translator — Tauri backend.
 //!
 //! Rust owns config, credentials, HTTP and document IO; the Vue layer is
 //! presentation only.
@@ -210,9 +210,17 @@ fn show_window(app: tauri::AppHandle) {
 /// 唤不出来了。
 #[tauri::command]
 fn hide_mini(app: tauri::AppHandle) {
+    // 收起即解除钉住，否则下次热键唤出时仍是钉住态，不会失焦隐藏。
+    tray::set_mini_pinned(false);
     if let Some(w) = app.get_webview_window("mini") {
         let _ = w.hide();
     }
+}
+
+/// 小窗「钉住」：钉住后点击别处不再收起（与划词弹窗同一套交互）。
+#[tauri::command]
+fn set_mini_pinned(pinned: bool) {
+    tray::set_mini_pinned(pinned);
 }
 
 // ---------- 划词翻译 ----------
@@ -234,6 +242,12 @@ fn hide_selection_popup(app: tauri::AppHandle) {
 #[tauri::command]
 fn take_pending_selection() -> Option<String> {
     selection::take_pending()
+}
+
+/// 钉住/取消钉住划词弹窗。钉住后点击别处不再自动收起，直到用户手动关闭。
+#[tauri::command]
+fn set_popup_pinned(pinned: bool) {
+    selection::set_pinned(pinned);
 }
 
 /// 供划词弹窗「复制译文」用。直接用 arboard，不再额外引入 clipboard 插件。
@@ -318,9 +332,10 @@ async fn translate(
     let resp = client::translate(&backend, key.as_deref(), temperature, timeout, &req).await?;
 
     if save_history.unwrap_or(true) {
+        let id = uuid::Uuid::new_v4().to_string();
         let _ = with_history(|h| {
             h.add(&history::HistoryItem {
-                id: uuid::Uuid::new_v4().to_string(),
+                id: id.clone(),
                 created_at: now_millis(),
                 source: req.text.clone(),
                 translation: resp.text.clone(),
@@ -328,17 +343,43 @@ async fn translate(
                 target_lang: resp.target_lang.clone(),
                 backend_id: backend.id.clone(),
                 mode: mode_key(req.mode).to_string(),
+                starred: false,
             })
+        });
+        return Ok(TranslateResponse {
+            history_id: Some(id),
+            ..resp
         });
     }
     Ok(resp)
+}
+
+/// 检测一段文本的语种。走模型自身的语种识别指令——选「检测语言」时
+/// 让前端能把「检测语言」徽标替换成具体检测到的语言名。
+///
+/// 复用 OpenAI 兼容端点，prompt 极简、只要求输出语言名。
+#[tauri::command]
+async fn detect_language(
+    state: State<'_, AppState>,
+    text: String,
+) -> CmdResult<String> {
+    let (backend, timeout) = {
+        let s = state.settings.lock().unwrap();
+        let b = s
+            .active()
+            .cloned()
+            .ok_or_else(|| AppError::Io("尚未配置任何后端".into()))?;
+        (b, s.timeout_secs)
+    };
+    let key = config::load_secret(&backend.id);
+    client::detect_language(&backend, key.as_deref(), timeout, &text).await
 }
 
 /// Streaming translation.
 ///
 /// Returns immediately; tokens are pushed to the webview as events:
 ///   - `hymt2:delta`  { job_id, text }   one or more times
-///   - `hymt2:done`   { job_id, text, target_lang, ms, used_terms }
+///   - `hymt2:done`   { job_id, text, target_lang, ms, used_terms, history_id }
 ///   - `hymt2:error`  { job_id, message }
 #[tauri::command]
 async fn translate_stream(
@@ -377,6 +418,8 @@ async fn translate_stream(
                     Ok((_, lang, used)) => (lang, used),
                     Err(_) => (String::new(), Vec::new()),
                 };
+                // 先生成 id 再入库，让前端拿到 history_id 就能立刻打星/操作这条记录。
+                let history_id = uuid::Uuid::new_v4().to_string();
                 let _ = app.emit(
                     "hymt2:done",
                     serde_json::json!({
@@ -385,13 +428,14 @@ async fn translate_stream(
                         "target_lang": target_lang,
                         "used_terms": used_terms,
                         "ms": started.elapsed().as_millis(),
+                        "history_id": history_id,
                     }),
                 );
                 // Persist to history once the stream finishes.
                 let hist = HISTORY.lock().unwrap();
                 if let Some(h) = hist.as_ref() {
                     let _ = h.add(&history::HistoryItem {
-                        id: uuid::Uuid::new_v4().to_string(),
+                        id: history_id,
                         created_at: now_millis(),
                         source: req.text.clone(),
                         translation: text,
@@ -399,6 +443,7 @@ async fn translate_stream(
                         target_lang,
                         backend_id: backend.id.clone(),
                         mode: mode_key(req.mode).to_string(),
+                        starred: false,
                     });
                 }
             }
@@ -434,15 +479,20 @@ fn preview_prompt(req: TranslateRequest) -> CmdResult<String> {
 pub struct GlossaryView {
     pub active: String,
     pub names: Vec<String>,
+    /// 与 `names` 对齐的各词库词条数，用于页签与导航徽标。
+    pub counts: Vec<usize>,
     pub terms: Vec<[String; 2]>,
 }
 
 #[tauri::command]
 fn glossary_get(state: State<'_, AppState>) -> GlossaryView {
     let g = state.glossary.lock().unwrap();
+    let names = g.names();
+    let counts = names.iter().map(|n| g.terms(n).len()).collect();
     GlossaryView {
         terms: g.terms(&g.active),
-        names: g.names(),
+        names,
+        counts,
         active: g.active.clone(),
     }
 }
@@ -521,9 +571,20 @@ fn with_history<T>(f: impl FnOnce(&History) -> AppResult<T>) -> CmdResult<T> {
 #[tauri::command]
 fn history_list(
     search: Option<String>,
+    starred: Option<bool>,
     limit: Option<i64>,
 ) -> CmdResult<Vec<history::HistoryItem>> {
-    with_history(|h| h.list(search.as_deref(), limit.unwrap_or(100)))
+    with_history(|h| h.list(search.as_deref(), starred, limit.unwrap_or(100)))
+}
+
+#[tauri::command]
+fn history_count() -> CmdResult<i64> {
+    with_history(|h| h.count())
+}
+
+#[tauri::command]
+fn history_set_starred(id: String, starred: bool) -> CmdResult<()> {
+    with_history(|h| h.set_starred(&id, starred))
 }
 
 #[tauri::command]
@@ -877,7 +938,10 @@ pub fn run() {
             // 也省得用户非要按一次 Esc。
             if let tauri::WindowEvent::Focused(false) = event {
                 if win.label() == "mini" {
-                    let _ = win.hide();
+                    // 钉住时不收起——用户可能在读译文或复制，误点别处不该把窗弄没。
+                    if !tray::mini_pinned() {
+                        let _ = win.hide();
+                    }
                 }
                 return;
             }
@@ -940,9 +1004,11 @@ pub fn run() {
             set_autostart,
             show_window,
             hide_mini,
+            set_mini_pinned,
             selection_status,
             hide_selection_popup,
             take_pending_selection,
+            set_popup_pinned,
             copy_text,
             read_clipboard_text,
             set_active_backend,
@@ -951,6 +1017,7 @@ pub fn run() {
             translate,
             translate_stream,
             preview_prompt,
+            detect_language,
             glossary_get,
             glossary_set_terms,
             glossary_activate,
@@ -960,6 +1027,8 @@ pub fn run() {
             glossary_export,
             glossary_import,
             history_list,
+            history_count,
+            history_set_starred,
             history_delete,
             history_clear,
             doc_load,

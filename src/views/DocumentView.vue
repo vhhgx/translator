@@ -93,7 +93,7 @@ function kindCount(d: LoadedDocument): Record<string, number> {
     </div>
 
     <div v-if="!doc" class="empty">
-      <span class="empty__icon">📄</span>
+      <FileText :size="32" class="empty__icon" />
       <span>选择一个 .txt 或 .md 文件开始</span>
       <span class="empty__hint">自动识别 GBK / GB18030 / Big5 等编码，Markdown 会保留标题、列表和代码块</span>
     </div>
@@ -153,14 +153,14 @@ function kindCount(d: LoadedDocument): Record<string, number> {
   padding: var(--sp-3);
   margin-bottom: var(--sp-3);
   font-size: 13px;
-  background: #e6f4ea;
-  border: 1px solid #a8dab5;
+  background: color-mix(in srgb, var(--status-online) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--status-online) 30%, transparent);
   border-radius: var(--r-md);
 }
 
 .doc__result--err {
-  background: #fce8e6;
-  border-color: #f5c6c2;
+  background: var(--status-danger-bg);
+  border-color: color-mix(in srgb, var(--status-danger) 30%, transparent);
 }
 
 .doc__out code {

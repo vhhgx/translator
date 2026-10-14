@@ -60,6 +60,8 @@ export interface TranslateResponse {
   target_lang: string
   ms: number
   used_terms: string[]
+  /** 入库后的历史记录 id（save_history 时才有） */
+  history_id?: string
 }
 
 export interface HistoryItem {
@@ -71,11 +73,14 @@ export interface HistoryItem {
   target_lang: string
   backend_id: string
   mode: string
+  starred: boolean
 }
 
 export interface GlossaryView {
   active: string
   names: string[]
+  /** 与 names 对齐的各词库词条数 */
+  counts: number[]
   terms: TermPair[]
 }
 

@@ -82,6 +82,8 @@ static CURSOR_Y: AtomicI32 = AtomicI32::new(0);
 static LAST_FIRE: Mutex<Option<Instant>> = Mutex::new(None);
 /// 上一次推给弹窗的原文。用来识别「选区还在、又点了一下」的重复触发。
 static LAST_SHOWN: Mutex<Option<String>> = Mutex::new(None);
+/// 弹窗是否被用户钉住。钉住期间点击别处不收起，新划词也不打扰当前内容。
+static PINNED: AtomicBool = AtomicBool::new(false);
 /// `rdev::listen` 起不来时的原因（Wayland、无 X11 等），留给设置页展示。
 static START_ERROR: Mutex<Option<String>> = Mutex::new(None);
 /// 待弹窗处理的文本。
@@ -166,6 +168,15 @@ pub fn hide(app: &AppHandle) {
     }
 }
 
+/// 设置/取消钉住。取消钉住时如果弹窗还开着，就保持现状（下次点击别处才收起）。
+pub fn set_pinned(pinned: bool) {
+    PINNED.store(pinned, Ordering::Relaxed);
+}
+
+fn pinned() -> bool {
+    PINNED.load(Ordering::Relaxed)
+}
+
 fn set_mod(key: Key, down: bool) {
     match key {
         Key::ControlLeft | Key::ControlRight => HELD_CTRL.store(down, Ordering::Relaxed),
@@ -243,7 +254,8 @@ fn on_event(app: &AppHandle, event: EventType) {
         EventType::KeyPress(k) => set_mod(k, true),
         EventType::KeyRelease(k) => set_mod(k, false),
         EventType::ButtonPress(Button::Left) => {
-            if !cursor_in_popup(app) {
+            // 钉住时点击别处不收起——这正是钉住的意义。用户会用关闭按钮收起。
+            if !cursor_in_popup(app) && !pinned() {
                 hide(app);
             }
         }
@@ -269,6 +281,14 @@ fn on_event(app: &AppHandle, event: EventType) {
 }
 
 fn capture_and_show(app: &AppHandle) {
+    // 钉住期间不打扰：新划词不覆盖当前内容，也不把窗口挪到光标处。
+    if pinned() {
+        if let Some(w) = app.get_webview_window(POPUP_LABEL) {
+            if w.is_visible().unwrap_or(false) {
+                return;
+            }
+        }
+    }
     let Some(raw) = capture_selected_text() else {
         // 没选区 = 用户把选区清掉了。这之后重新选中同样的文字，是一次
         // 真正的重新划词，该弹还得弹。

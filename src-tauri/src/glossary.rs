@@ -42,7 +42,7 @@ impl Default for Glossary {
 fn store_path() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("hy-mt2-translator")
+        .join("zephyr-translator")
         .join("glossary.json")
 }
 

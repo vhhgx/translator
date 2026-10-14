@@ -38,6 +38,9 @@ pub struct TranslateResponse {
     pub ms: u128,
     /// Terms that were actually injected (useful for the UI's "命中术语" hint).
     pub used_terms: Vec<String>,
+    /// 入库后的历史记录 id（仅在 save_history 时由 lib.rs 回填）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub history_id: Option<String>,
 }
 
 /// 剥到 API 根地址：容忍用户把 baseurl 填成 `/v1` 甚至完整的
@@ -350,7 +353,60 @@ pub async fn translate(
         target_lang: resolved,
         ms: started.elapsed().as_millis(),
         used_terms,
+        history_id: None,
     })
+}
+
+/// 语种检测：极简 prompt，只让模型回语言代码（en / zh / ja …）。
+/// 用的是同一个 OpenAI 兼容端点，temperature 取 0 保证稳定输出。
+pub async fn detect_language(
+    backend: &Backend,
+    key: Option<&str>,
+    timeout_secs: u64,
+    text: &str,
+) -> AppResult<String> {
+    // 太长没必要：前 200 个字符对语种识别已经足够
+    let sample: String = text.chars().take(200).collect();
+    let body = serde_json::json!({
+        "model": backend.model,
+        "temperature": 0.0,
+        "max_tokens": 16,
+        "stream": false,
+        "messages": [{
+            "role": "user",
+            "content": format!(
+                "Detect the language of the following text and reply with ONLY its \
+                 language code (e.g. en, zh, ja, fr). No explanation.\n\n{sample}"
+            )
+        }]
+    });
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(timeout_secs.min(30)))
+        .build()
+        .map_err(|e| AppError::Http(e.to_string()))?;
+    let mut req = client.post(endpoint(&backend.base_url)).json(&body);
+    if let Some(k) = key {
+        req = req.bearer_auth(k);
+    }
+    let raw = req
+        .send()
+        .await
+        .map_err(|e| AppError::Http(e.to_string()))?
+        .text()
+        .await
+        .map_err(|e| AppError::Http(e.to_string()))?;
+    let json: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| AppError::Http(format!("响应解析失败: {e}")))?;
+    let out = json
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("message"))
+        .and_then(|m| m.get("content"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_lowercase();
+    Ok(out)
 }
 
 #[cfg(test)]
