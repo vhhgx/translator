@@ -1,0 +1,13 @@
+[Desktop Entry]
+Categories=Utility;
+{{#if comment}}
+Comment={{comment}}
+{{/if}}
+Exec={{exec}}
+StartupWMClass={{exec}}
+Icon={{icon}}
+Name=Hy-MT2 翻译工具
+GenericName=翻译工具
+Keywords=translate;translation;翻译;Hy-MT2;
+Terminal=false
+Type=Application

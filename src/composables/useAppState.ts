@@ -22,7 +22,10 @@ export const settings = ref<Settings>({
   temperature: 0.1,
   timeout_secs: 300,
   close_to_tray: true,
-  hotkey_toggle: 'Ctrl+Shift+D'
+  hotkey_toggle: 'Ctrl+Shift+D',
+  hotkey_mini: 'Ctrl+Shift+S',
+  selection_enabled: false,
+  selection_modifier: ''
 })
 export const glossary = ref<GlossaryView>({ active: '', names: [], terms: [] })
 export const ready = ref(false)

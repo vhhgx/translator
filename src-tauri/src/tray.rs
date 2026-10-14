@@ -18,6 +18,10 @@ use crate::config::Settings;
 const MENU_SHOW: &str = "hymt2-show";
 const MENU_QUIT: &str = "hymt2-quit";
 
+/// 热键种类。设置页有两个热键，注册结果要分开报告，不能混在一起。
+pub const HOTKEY_TOGGLE: &str = "toggle";
+pub const HOTKEY_MINI: &str = "mini";
+
 /// 显示并把窗口拉到前台。托盘、热键、命令最终都走这里，保证行为一致。
 pub fn show_window<R: Runtime>(app: &AppHandle<R>) {
     let Some(win) = app.get_webview_window("main") else {
@@ -98,10 +102,37 @@ pub fn register_toggle_hotkey<R: Runtime>(app: &AppHandle<R>, accel: &str) -> Re
     Ok(())
 }
 
-/// 重新绑定：先全部注销，再按新配置注册。
-pub fn rebind_hotkey<R: Runtime>(app: &AppHandle<R>, accel: &str) -> Result<(), String> {
-    let _ = app.global_shortcut().unregister_all();
-    register_toggle_hotkey(app, accel)
+/// 切换小窗模式。
+///
+/// 小窗是「输入 + 译文」的轻量窗口，唤出它**不碰主窗口**——用户按这个热键
+/// 就是想快速译一句，再弹一个 960×640 的主窗口反而碍事。想进主窗口，用小窗
+/// 上的按钮。
+pub fn toggle_mini<R: Runtime>(app: &AppHandle<R>) {
+    let Some(win) = app.get_webview_window("mini") else {
+        return;
+    };
+    if win.is_visible().unwrap_or(false) {
+        let _ = win.hide();
+        return;
+    }
+    let _ = win.show();
+    let _ = win.set_focus();
+    // 让前端复位输入框并聚焦（窗口是常驻的，不重启就收不到 onMounted）
+    let _ = app.emit_to("mini", "hymt2:mini-shown", serde_json::json!({}));
+}
+
+/// 注册小窗模式的全局热键。
+pub fn register_mini_hotkey<R: Runtime>(app: &AppHandle<R>, accel: &str) -> Result<(), String> {
+    let shortcut = Shortcut::from_str(accel).map_err(|e| format!("快捷键格式无法解析：{e}"))?;
+    app.global_shortcut()
+        .on_shortcut(shortcut, move |app, _sc, event| {
+            if event.state() != ShortcutState::Pressed {
+                return;
+            }
+            toggle_mini(app);
+        })
+        .map_err(|e| format!("注册失败（可能被其他软件占用）：{e}"))?;
+    Ok(())
 }
 
 /// 窗口关闭时按设置决定隐藏到托盘还是真退出。
@@ -112,26 +143,40 @@ pub fn on_close_requested<R: Runtime>(win: &WebviewWindow<R>, close_to_tray: boo
 }
 
 /// 把热键注册结果推给前端，界面据此提示用户。
-pub fn notify_hotkey<R: Runtime>(app: &AppHandle<R>, ok: bool, message: String) {
+///
+/// `which` 区分是哪一个热键（`HOTKEY_TOGGLE` / `HOTKEY_MINI`），设置页
+/// 有两个热键，结果不能混着报。
+pub fn notify_hotkey<R: Runtime>(app: &AppHandle<R>, which: &str, ok: bool, message: String) {
     let _ = app.emit(
         "hymt2:hotkey",
-        serde_json::json!({ "ok": ok, "message": message }),
+        serde_json::json!({ "which": which, "ok": ok, "message": message }),
     );
 }
 
-/// 按配置注册热键并把结果通知前端。
-pub fn apply_hotkey_from_settings<R: Runtime>(app: &AppHandle<R>, s: &Settings) {
-    if s.hotkey_toggle.trim().is_empty() {
-        let _ = app.global_shortcut().unregister_all();
-        notify_hotkey(app, true, "已关闭全局热键".to_string());
-        return;
+/// 按配置重新注册**全部**热键，并把结果逐个通知前端。
+///
+/// 两个热键共用一次 `unregister_all`，所以必须一起重注册——只改其中一个
+/// 也要把另一个带上，否则改一次就少一个。
+pub fn apply_hotkeys<R: Runtime>(app: &AppHandle<R>, s: &Settings) {
+    let _ = app.global_shortcut().unregister_all();
+
+    let toggle = s.hotkey_toggle.trim();
+    if toggle.is_empty() {
+        notify_hotkey(app, HOTKEY_TOGGLE, true, "全局热键未启用".into());
+    } else {
+        match register_toggle_hotkey(app, toggle) {
+            Ok(()) => notify_hotkey(app, HOTKEY_TOGGLE, true, format!("全局热键已注册：{toggle}")),
+            Err(e) => notify_hotkey(app, HOTKEY_TOGGLE, false, e),
+        }
     }
-    match rebind_hotkey(app, &s.hotkey_toggle) {
-        Ok(()) => notify_hotkey(
-            app,
-            true,
-            format!("全局热键已注册：{}", s.hotkey_toggle),
-        ),
-        Err(e) => notify_hotkey(app, false, e),
+
+    let mini = s.hotkey_mini.trim();
+    if mini.is_empty() {
+        notify_hotkey(app, HOTKEY_MINI, true, "小窗热键未启用".into());
+    } else {
+        match register_mini_hotkey(app, mini) {
+            Ok(()) => notify_hotkey(app, HOTKEY_MINI, true, format!("小窗热键已注册：{mini}")),
+            Err(e) => notify_hotkey(app, HOTKEY_MINI, false, e),
+        }
     }
 }

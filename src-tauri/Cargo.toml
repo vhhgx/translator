@@ -31,6 +31,8 @@ uuid = { version = "1", features = ["v4"] }
 dirs = "5"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-autostart = "2"
+rdev = "0.5.3"
+arboard = "3.6.1"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation"] }

@@ -1,6 +1,17 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from 'vue'
+import type { Component } from 'vue'
 import { getCurrentWindow } from '@tauri-apps/api/window'
+import {
+  BookOpen,
+  Clock3,
+  FileText,
+  Globe,
+  Languages,
+  Menu,
+  Package,
+  Settings
+} from '@lucide/vue'
 import { toasts } from './api'
 import { reloadAll, settings } from './composables/useAppState'
 import BatchView from './views/BatchView.vue'
@@ -16,13 +27,13 @@ type Tab = 'translate' | 'glossary' | 'history' | 'batch' | 'doc' | 'settings'
 const tab = ref<Tab>('translate')
 const menuOpen = ref(false)
 
-const NAV_ITEMS: { key: Tab; label: string; icon: string }[] = [
-  { key: 'translate', label: '翻译', icon: '文A' },
-  { key: 'doc', label: '文档', icon: '📄' },
-  { key: 'batch', label: '批量', icon: '📦' },
-  { key: 'glossary', label: '术语库', icon: '📖' },
-  { key: 'history', label: '历史记录', icon: '🕘' },
-  { key: 'settings', label: '设置', icon: '⚙' }
+const NAV_ITEMS: { key: Tab; label: string; icon: Component }[] = [
+  { key: 'translate', label: '翻译', icon: Languages },
+  { key: 'doc', label: '文档', icon: FileText },
+  { key: 'batch', label: '批量', icon: Package },
+  { key: 'glossary', label: '术语库', icon: BookOpen },
+  { key: 'history', label: '历史记录', icon: Clock3 },
+  { key: 'settings', label: '设置', icon: Settings }
 ]
 
 onMounted(reloadAll)
@@ -117,9 +128,7 @@ function reuse(item: HistoryItem) {
       <header class="topbar" @mousedown="startDrag" @dblclick="onTitleDblClick">
         <div class="topbar__left">
           <button class="icon-btn" title="主菜单" @click="menuOpen = !menuOpen">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M3 6h18M3 12h18M3 18h18" />
-            </svg>
+            <Menu :size="20" />
           </button>
 
           <!-- 模式胶囊紧挨汉堡菜单排列 -->
@@ -129,7 +138,7 @@ function reuse(item: HistoryItem) {
               :class="{ 'top-pill--active': tab === 'translate' }"
               @click="go('translate')"
             >
-              <span class="top-pill__icon">文A</span>
+              <Languages :size="15" />
               <span>文本</span>
             </button>
             <button
@@ -137,13 +146,7 @@ function reuse(item: HistoryItem) {
             :class="{ 'top-pill--active': tab === 'doc' }"
             @click="go('doc')"
           >
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-              <polyline points="14 2 14 8 20 8" />
-              <line x1="16" y1="13" x2="8" y2="13" />
-              <line x1="16" y1="17" x2="8" y2="17" />
-              <polyline points="10 9 9 9 8 9" />
-            </svg>
+            <FileText :size="15" />
             <span>Document</span>
           </button>
           <button
@@ -151,11 +154,7 @@ function reuse(item: HistoryItem) {
             :class="{ 'top-pill--active': tab === 'batch' }"
             @click="go('batch')"
           >
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <circle cx="12" cy="12" r="10" />
-              <line x1="2" y1="12" x2="22" y2="12" />
-              <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
-            </svg>
+            <Globe :size="15" />
             <span>Website / 批量</span>
           </button>
           </div>
@@ -195,7 +194,7 @@ function reuse(item: HistoryItem) {
             :class="{ 'menu__item--active': tab === n.key }"
             @click="go(n.key)"
           >
-            <span class="menu__icon">{{ n.icon }}</span>
+            <span class="menu__icon"><component :is="n.icon" :size="16" /></span>
             <span>{{ n.label }}</span>
           </button>
         </div>
@@ -309,11 +308,6 @@ function reuse(item: HistoryItem) {
   color: var(--c-primary);
 }
 
-.top-pill__icon {
-  font-weight: 600;
-  font-size: 13px;
-}
-
 .wincontrols {
   display: flex;
   align-items: stretch;
@@ -385,9 +379,9 @@ function reuse(item: HistoryItem) {
 }
 
 .menu__icon {
-  font-size: 16px;
+  display: inline-flex;
+  justify-content: center;
   width: 20px;
-  text-align: center;
 }
 
 .drop-enter-active,

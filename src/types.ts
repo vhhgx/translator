@@ -19,6 +19,24 @@ export interface Settings {
   close_to_tray: boolean
   /** 显示/隐藏窗口的全局热键，如 "Ctrl+Shift+D"；空串表示不注册 */
   hotkey_toggle: string
+  /** 小窗模式的全局热键，如 "Ctrl+Shift+S"；空串表示不注册 */
+  hotkey_mini: string
+  /** 划词翻译：选中文本后在光标处自动弹窗（需常驻进程 + 全局鼠标监听） */
+  selection_enabled: boolean
+  /** 触发划词所需的修饰键："" = 不要求，"ctrl" / "alt" / "shift" */
+  selection_modifier: string
+}
+
+/** 一个全局热键的注册状态 */
+export interface HotkeyEntry {
+  accel: string
+  registered: boolean
+}
+
+/** 两个全局热键各自的注册状态 */
+export interface HotkeyStatus {
+  toggle: HotkeyEntry
+  mini: HotkeyEntry
 }
 
 /** 一条术语：[源词, 译词] */

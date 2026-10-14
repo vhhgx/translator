@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "应用默认权限：核心命令 + 文件对话框 + 前端事件订阅 + 自绘标题栏的窗口控制 + 全局热键与开机自启",
-  "windows": ["main"],
+  "description": "应用默认权限：核心命令 + 文件对话框 + 前端事件订阅 + 自绘标题栏的窗口控制 + 全局热键与开机自启。main = 主窗口，popup = 划词弹窗，mini = 小窗模式；后两者同样要订阅流式事件。",
+  "windows": ["main", "popup", "mini"],
   "permissions": [
     "core:default",
     "dialog:default",

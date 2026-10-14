@@ -76,6 +76,15 @@ body {
   overflow: hidden;
 }
 
+/* ---------- 划词弹窗 ---------- */
+/* 弹窗窗口是 transparent 的，不能沿用主窗口那不透明的 body 底色，
+   否则圆角外面会糊上一层方形的底色。 */
+html.is-popup,
+html.is-popup body,
+html.is-popup #app {
+  background: transparent;
+}
+
 /* ---------- 通用控件 ---------- */
 
 .btn {

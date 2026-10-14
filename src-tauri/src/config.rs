@@ -39,6 +39,18 @@ pub struct Settings {
     /// 显示/隐藏窗口的全局热键，写成 "Ctrl+Shift+D" 这样的形式。
     #[serde(default = "default_hotkey")]
     pub hotkey_toggle: String,
+    /// 小窗模式的全局热键：唤出一个只做输入+译文的小窗，不动主窗口。
+    /// 空串表示不注册。
+    #[serde(default = "default_hotkey_mini")]
+    pub hotkey_mini: String,
+    /// 划词翻译：选中文本后在光标处自动弹窗。默认关闭——它要装全局鼠标钩子，
+    /// 且每次划词都会动一下剪贴板，属于需要用户明确同意的能力。
+    #[serde(default)]
+    pub selection_enabled: bool,
+    /// 触发划词所需的修饰键："" = 不要求，"ctrl" / "alt" / "shift"。
+    /// 不要求修饰键时任何拖选都会弹窗，容易吵，留给用户自己权衡。
+    #[serde(default)]
+    pub selection_modifier: String,
 }
 
 fn default_temperature() -> f32 {
@@ -52,6 +64,9 @@ fn default_true() -> bool {
 }
 fn default_hotkey() -> String {
     "Ctrl+Shift+D".to_string()
+}
+fn default_hotkey_mini() -> String {
+    "Ctrl+Shift+S".to_string()
 }
 
 impl Default for Settings {
@@ -78,6 +93,9 @@ impl Default for Settings {
             timeout_secs: default_timeout(),
             close_to_tray: default_true(),
             hotkey_toggle: default_hotkey(),
+            hotkey_mini: default_hotkey_mini(),
+            selection_enabled: false,
+            selection_modifier: String::new(),
         }
     }
 }

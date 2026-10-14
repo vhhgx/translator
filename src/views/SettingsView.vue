@@ -11,9 +11,21 @@ const keyInputs = ref<Record<string, string>>({})
 
 // ---------- 托盘 / 热键 / 自启 ----------
 const autostart = ref(false)
-const hotkeyInput = ref('')
-const hotkeyState = ref<{ ok: boolean; message: string } | null>(null)
-const recording = ref(false)
+
+/** 两个全局热键：toggle = 主窗口显隐，mini = 小窗模式。 */
+type Which = 'toggle' | 'mini'
+const HOTKEY_ROWS: { key: Which; label: string; hint: string }[] = [
+  { key: 'toggle', label: '主窗口显隐热键', hint: '按一次唤出主窗口，再按一次收起' },
+  { key: 'mini', label: '小窗模式热键', hint: '唤出「输入 + 译文」小窗，不动主窗口' }
+]
+
+const hotkeyInputs = ref<Record<Which, string>>({ toggle: '', mini: '' })
+const hotkeyStates = ref<Record<Which, { ok: boolean; message: string } | null>>({
+  toggle: null,
+  mini: null
+})
+/** 正在录制哪个热键；null = 没在录 */
+const recording = ref<Which | null>(null)
 
 /** 录制热键时用到的修饰键集合。 */
 const MODS = ['Control', 'Alt', 'Shift', 'Meta']
@@ -33,31 +45,41 @@ function prettyHotkey(e: KeyboardEvent): string | null {
 }
 
 function onRecordKey(e: KeyboardEvent) {
-  if (!recording.value) return
+  const which = recording.value
+  if (!which) return
   e.preventDefault()
   if (e.key === 'Escape') {
-    recording.value = false
+    recording.value = null
     return
   }
   const accel = prettyHotkey(e)
   if (!accel) return
-  recording.value = false
-  applyHotkey(accel)
+  recording.value = null
+  applyHotkey(which, accel)
 }
 
-async function applyHotkey(accel: string) {
-  hotkeyInput.value = accel
+/**
+ * 改热键。成败不在这里判断——两个热键共用后端的一次 unregister_all，改一个
+ * 会连另一个一起重注册，所以后端把两者的结果都用 `hymt2:hotkey` 事件回报。
+ */
+async function applyHotkey(which: Which, accel: string) {
+  hotkeyInputs.value[which] = accel
   try {
-    await api.setHotkey(accel)
-    settings.value.hotkey_toggle = accel
-    await saveSettings()
-    hotkeyState.value = { ok: true, message: `全局热键已注册：${accel}` }
-    toast(`全局热键已设为 ${accel}`, 'success')
+    await api.setHotkey(which, accel)
+    if (which === 'toggle') settings.value.hotkey_toggle = accel
+    else settings.value.hotkey_mini = accel
+    toast(accel ? `热键已设为 ${accel}` : '已清除该热键', 'success')
   } catch (e) {
-    // 注册失败（多半被别的软件占用）必须明确告知，否则用户无从排查
-    hotkeyState.value = { ok: false, message: String(e) }
+    hotkeyStates.value[which] = { ok: false, message: String(e) }
     err(e)
   }
+}
+
+function describeHotkey(accel: string, registered: boolean, label: string) {
+  if (!accel) return { ok: true, message: `${label}未启用` }
+  return registered
+    ? { ok: true, message: `${label}已注册：${accel}` }
+    : { ok: false, message: `${label}未生效：${accel}（可能被其他软件占用）` }
 }
 
 async function toggleAutostart(v: boolean) {
@@ -72,8 +94,32 @@ async function toggleAutostart(v: boolean) {
   }
 }
 
+// ---------- 划词翻译 ----------
+type SelStatus = {
+  enabled: boolean
+  started: boolean
+  modifier: string
+  error: string | null
+}
+const selStatus = ref<SelStatus | null>(null)
+
+async function refreshSelStatus() {
+  try {
+    selStatus.value = await api.selectionStatus()
+  } catch {
+    // 浏览器预览没有 IPC
+    selStatus.value = null
+  }
+}
+
+async function toggleSelection(v: boolean) {
+  settings.value.selection_enabled = v
+  await saveSettings()
+  // 监听线程是异步拉起的，稍等一下再查真实状态
+  setTimeout(refreshSelStatus, 400)
+}
+
 onMounted(async () => {
-  hotkeyInput.value = settings.value.hotkey_toggle
   try {
     autostart.value = await api.getAutostart()
   } catch {
@@ -82,22 +128,21 @@ onMounted(async () => {
   // 启动时后端推的事件早于本组件挂载，必然收不到，所以主动查一次真实状态
   try {
     const st = await api.hotkeyStatus()
-    hotkeyInput.value = st.accel
-    hotkeyState.value = st.accel
-      ? {
-          ok: st.registered,
-          message: st.registered
-            ? `全局热键已注册：${st.accel}`
-            : `全局热键未生效：${st.accel}（可能被其他软件占用）`
-        }
-      : { ok: true, message: '未启用全局热键' }
+    hotkeyInputs.value = { toggle: st.toggle.accel, mini: st.mini.accel }
+    hotkeyStates.value = {
+      toggle: describeHotkey(st.toggle.accel, st.toggle.registered, '全局热键'),
+      mini: describeHotkey(st.mini.accel, st.mini.registered, '小窗热键')
+    }
   } catch {
     /* 浏览器预览没有 IPC，忽略即可 */
   }
-  // 之后的换绑结果走事件实时更新
-  listen<{ ok: boolean; message: string }>('hymt2:hotkey', (e) => {
-    hotkeyState.value = e.payload
+  // 之后的换绑结果走事件实时更新，`which` 用来区分是哪一个热键
+  listen<{ which: string; ok: boolean; message: string }>('hymt2:hotkey', (e) => {
+    const which: Which = e.payload.which === 'mini' ? 'mini' : 'toggle'
+    hotkeyStates.value[which] = { ok: e.payload.ok, message: e.payload.message }
   })
+
+  refreshSelStatus()
 })
 
 async function test(b: Backend) {
@@ -177,32 +222,79 @@ async function removeBackend(b: Backend) {
         />
       </label>
 
-      <div class="row">
-        <span class="row__label">
-          全局热键（显示/隐藏窗口）
-          <em class="row__hint">
-            {{ recording ? '按下想要的组合键，Esc 取消' : '点击「录制」后按下组合键' }}
-          </em>
-        </span>
-        <div class="hotkey">
-          <input v-model="hotkeyInput" class="input input--sm hotkey__input" readonly />
-          <button class="btn btn--sm" @click="recording = !recording">
-            {{ recording ? '取消' : '录制' }}
-          </button>
-          <button class="btn btn--sm" @click="applyHotkey(hotkeyInput.trim())">应用</button>
-          <button
-            class="btn btn--sm"
-            title="取消全局热键"
-            @click="applyHotkey('')"
-          >
-            清除
-          </button>
+      <div v-for="r in HOTKEY_ROWS" :key="r.key" class="hk">
+        <div class="row">
+          <span class="row__label">
+            {{ r.label }}
+            <em class="row__hint">
+              {{ recording === r.key ? '按下想要的组合键，Esc 取消' : r.hint }}
+            </em>
+          </span>
+          <div class="hotkey">
+            <input v-model="hotkeyInputs[r.key]" class="input input--sm hotkey__input" readonly />
+            <button class="btn btn--sm" @click="recording = recording === r.key ? null : r.key">
+              {{ recording === r.key ? '取消' : '录制' }}
+            </button>
+            <button class="btn btn--sm" @click="applyHotkey(r.key, hotkeyInputs[r.key].trim())">
+              应用
+            </button>
+            <button class="btn btn--sm" title="取消该热键" @click="applyHotkey(r.key, '')">
+              清除
+            </button>
+          </div>
         </div>
+        <p
+          v-if="hotkeyStates[r.key]"
+          class="hotkey__state"
+          :class="hotkeyStates[r.key]?.ok ? 'ok' : 'bad'"
+        >
+          {{ hotkeyStates[r.key]?.ok ? '✓' : '✗' }} {{ hotkeyStates[r.key]?.message }}
+        </p>
       </div>
 
-      <p v-if="hotkeyState" class="hotkey__state" :class="hotkeyState.ok ? 'ok' : 'bad'">
-        {{ hotkeyState.ok ? '✓' : '✗' }} {{ hotkeyState.message }}
+      <label class="row">
+        <span class="row__label">
+          划词翻译（选中后自动弹窗）
+          <em class="row__hint">
+            监听全局鼠标，选中文本即在光标处弹出译文。仅 Windows 与 Linux(X11) 可用；
+            Wayland 下无法模拟按键，会启动失败
+          </em>
+        </span>
+        <input
+          class="switch"
+          type="checkbox"
+          :checked="settings.selection_enabled"
+          @change="toggleSelection(($event.target as HTMLInputElement).checked)"
+        />
+      </label>
+
+      <label class="row">
+        <span class="row__label">
+          划词触发修饰键
+          <em class="row__hint">不要求修饰键时，任何拖选都会弹窗，容易吵</em>
+        </span>
+        <select
+          v-model="settings.selection_modifier"
+          class="input select--mod"
+          @change="saveSettings()"
+        >
+          <option value="">不要求</option>
+          <option value="ctrl">按住 Ctrl</option>
+          <option value="alt">按住 Alt</option>
+          <option value="shift">按住 Shift</option>
+        </select>
+      </label>
+
+      <p v-if="selStatus" class="hotkey__state" :class="selStatus.error ? 'bad' : 'ok'">
+        <template v-if="selStatus.error">
+          ✗ 划词监听启动失败：{{ selStatus.error }}（Wayland 下属预期）
+        </template>
+        <template v-else-if="selStatus.enabled">
+          ✓ 划词监听已启动{{ selStatus.started ? '' : '，等待线程就绪' }}
+        </template>
+        <template v-else>未启用划词翻译</template>
       </p>
+
       <p class="tray-card__note">
         托盘图标：左键单击直接唤出窗口，右键菜单提供「显示窗口 / 退出」。
       </p>
@@ -335,9 +427,27 @@ async function removeBackend(b: Backend) {
   text-align: center;
 }
 
+.select--mod {
+  width: 130px;
+  flex-shrink: 0;
+}
+
 .hotkey__state {
   margin: var(--sp-3) 0 0;
   font-size: 12px;
+}
+
+/* 每个热键一个分组：分隔线挪到分组上，行内那条去掉，免得出现双线 */
+.hk {
+  border-bottom: 1px solid var(--c-border-soft);
+}
+
+.hk:last-of-type {
+  border-bottom: none;
+}
+
+.hk .row {
+  border-bottom: none;
 }
 
 .hotkey__state.ok {

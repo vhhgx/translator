@@ -8,6 +8,7 @@ import type {
   ExportPayload,
   GlossaryView,
   HistoryItem,
+  HotkeyStatus,
   LoadedDocument,
   Meta,
   Settings,
@@ -45,13 +46,29 @@ export const api = {
   testBackend: (backend: Backend) => invoke<string[]>('test_backend', { backend }),
 
   // ---------- 托盘 / 全局热键 / 开机自启 ----------
-  // 热键注册失败时后端会返回错误文本（多半是被别的软件占用），必须展示给用户
-  setHotkey: (accel: string) => invoke<string>('set_hotkey', { accel }),
+  // 热键注册结果由后端通过 hymt2:hotkey 事件逐个回报（带 which 字段），
+  // 因为两个热键共用一次 unregister_all，改一个会连另一个一起重注册。
+  setHotkey: (kind: 'toggle' | 'mini', accel: string) =>
+    invoke<string>('set_hotkey', { kind, accel }),
   getHotkey: () => invoke<string>('get_hotkey'),
-  hotkeyStatus: () => invoke<{ accel: string; registered: boolean }>('hotkey_status'),
+  hotkeyStatus: () => invoke<HotkeyStatus>('hotkey_status'),
   getAutostart: () => invoke<boolean>('get_autostart'),
   setAutostart: (enable: boolean) => invoke<void>('set_autostart', { enable }),
   showWindow: () => invoke<void>('show_window'),
+
+  // ---------- 小窗模式 ----------
+  hideMini: () => invoke<void>('hide_mini'),
+
+  // ---------- 划词翻译 ----------
+  // 只在 Windows / Linux(X11) 可用；Wayland 下监听起不来，error 里会带原因
+  selectionStatus: () =>
+    invoke<{ enabled: boolean; started: boolean; modifier: string; error: string | null }>(
+      'selection_status'
+    ),
+  hideSelectionPopup: () => invoke<void>('hide_selection_popup'),
+  takePendingSelection: () => invoke<string | null>('take_pending_selection'),
+  copyText: (text: string) => invoke<void>('copy_text', { text }),
+  readClipboardText: () => invoke<string>('read_clipboard_text'),
 
   translate: (req: TranslateRequest, saveHistory = true) =>
     invoke<TranslateResponse>('translate', { req, saveHistory }),

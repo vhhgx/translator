@@ -10,6 +10,7 @@ pub mod error;
 pub mod glossary;
 pub mod history;
 pub mod prompt;
+pub mod selection;
 pub mod tray;
 
 use std::sync::{Arc, Mutex};
@@ -78,7 +79,11 @@ fn get_settings(state: State<'_, AppState>) -> Settings {
 }
 
 #[tauri::command]
-fn save_settings(state: State<'_, AppState>, mut s: Settings) -> CmdResult<()> {
+fn save_settings(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    mut s: Settings,
+) -> CmdResult<()> {
     // has_api_key is derived, never trusted from the frontend.
     for b in &mut s.backends {
         b.has_api_key = config::load_secret(&b.id).is_some();
@@ -89,34 +94,39 @@ fn save_settings(state: State<'_, AppState>, mut s: Settings) -> CmdResult<()> {
         }
     }
     s.save()?;
+    let (sel_on, sel_mod) = (s.selection_enabled, s.selection_modifier.clone());
     *state.settings.lock().unwrap() = s;
+    // 开关一变就同步给监听线程；打开时才真正拉起钩子。
+    selection::configure(&app, sel_on, &sel_mod);
     Ok(())
 }
 
 // ---------- 托盘 / 全局热键 / 开机自启 ----------
 
-/// 热键换绑。注册失败时返回错误文本，界面必须显示出来——Windows 上
-/// RegisterHotKey 冲突是静默失败的，不提示用户会以为功能没生效。
+/// 改某一个全局热键。`kind` 取 `tray::HOTKEY_TOGGLE` 或 `tray::HOTKEY_MINI`。
+///
+/// 注册结果不在这里返回，而是走 `hymt2:hotkey` 事件逐个回报：两个热键共用
+/// 一次 `unregister_all`，改一个会把另一个一起重注册，两者的成败都得报。
 #[tauri::command]
-fn set_hotkey(app: tauri::AppHandle, state: State<'_, AppState>, accel: String) -> CmdResult<String> {
+fn set_hotkey(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    kind: String,
+    accel: String,
+) -> CmdResult<String> {
     let accel = accel.trim().to_string();
-    if accel.is_empty() {
-        // 空字符串表示不要全局热键
-        let _ = app.global_shortcut().unregister_all();
+    let snapshot = {
         let mut s = state.settings.lock().unwrap();
-        s.hotkey_toggle = String::new();
-        s.save()?;
-        return Ok(String::new());
-    }
-    match tray::rebind_hotkey(&app, &accel) {
-        Ok(()) => {
-            let mut s = state.settings.lock().unwrap();
-            s.hotkey_toggle = accel.clone();
-            s.save()?;
-            Ok(accel)
+        match kind.as_str() {
+            tray::HOTKEY_TOGGLE => s.hotkey_toggle = accel.clone(),
+            tray::HOTKEY_MINI => s.hotkey_mini = accel.clone(),
+            other => return Err(AppError::Io(format!("未知的热键类型：{other}"))),
         }
-        Err(e) => Err(AppError::Io(e)),
-    }
+        s.save()?;
+        s.clone()
+    };
+    tray::apply_hotkeys(&app, &snapshot);
+    Ok(accel)
 }
 
 #[tauri::command]
@@ -129,14 +139,19 @@ fn get_hotkey(state: State<'_, AppState>) -> String {
 /// 不能只靠启动时推事件：setup() 早于前端挂载 listen()，那条事件必然
 /// 被丢掉，界面会一直显示不出状态。所以让前端能主动查一次。
 #[derive(Serialize)]
-pub struct HotkeyStatus {
+pub struct HotkeyEntry {
     pub accel: String,
     pub registered: bool,
 }
 
-#[tauri::command]
-fn hotkey_status(app: tauri::AppHandle, state: State<'_, AppState>) -> HotkeyStatus {
-    let accel = state.settings.lock().unwrap().hotkey_toggle.clone();
+/// 两个热键各自的真实注册状态。
+#[derive(Serialize)]
+pub struct HotkeyStatus {
+    pub toggle: HotkeyEntry,
+    pub mini: HotkeyEntry,
+}
+
+fn hotkey_entry(app: &tauri::AppHandle, accel: &str) -> HotkeyEntry {
     let registered = if accel.trim().is_empty() {
         false
     } else {
@@ -145,7 +160,22 @@ fn hotkey_status(app: tauri::AppHandle, state: State<'_, AppState>) -> HotkeySta
             .map(|sc| app.global_shortcut().is_registered(sc))
             .unwrap_or(false)
     };
-    HotkeyStatus { accel, registered }
+    HotkeyEntry {
+        accel: accel.to_string(),
+        registered,
+    }
+}
+
+#[tauri::command]
+fn hotkey_status(app: tauri::AppHandle, state: State<'_, AppState>) -> HotkeyStatus {
+    let (toggle, mini) = {
+        let s = state.settings.lock().unwrap();
+        (s.hotkey_toggle.clone(), s.hotkey_mini.clone())
+    };
+    HotkeyStatus {
+        toggle: hotkey_entry(&app, &toggle),
+        mini: hotkey_entry(&app, &mini),
+    }
 }
 
 /// 开机自启状态以系统实际注册情况为准，不信任前端缓存。
@@ -171,6 +201,53 @@ fn set_autostart(app: tauri::AppHandle, enable: bool) -> CmdResult<()> {
 #[tauri::command]
 fn show_window(app: tauri::AppHandle) {
     tray::show_window(&app);
+}
+
+/// 小窗上的关闭按钮 / Esc 走这里。只隐藏，窗口留着——真销毁了热键就再也
+/// 唤不出来了。
+#[tauri::command]
+fn hide_mini(app: tauri::AppHandle) {
+    if let Some(w) = app.get_webview_window("mini") {
+        let _ = w.hide();
+    }
+}
+
+// ---------- 划词翻译 ----------
+
+/// 监听线程的真实状态。起不来（Wayland 等）时必须把原因显示给用户，
+/// 否则开关打开了却毫无反应，无从排查——和热键那套是同一个思路。
+#[tauri::command]
+fn selection_status() -> selection::SelectionStatus {
+    selection::status()
+}
+
+/// 划词弹窗上的关闭按钮。
+#[tauri::command]
+fn hide_selection_popup(app: tauri::AppHandle) {
+    selection::hide(&app);
+}
+
+/// 弹窗挂载后主动取一次待处理文本，见 `selection::take_pending` 的说明。
+#[tauri::command]
+fn take_pending_selection() -> Option<String> {
+    selection::take_pending()
+}
+
+/// 供划词弹窗「复制译文」用。直接用 arboard，不再额外引入 clipboard 插件。
+#[tauri::command]
+fn copy_text(text: String) -> CmdResult<()> {
+    let mut cb = arboard::Clipboard::new().map_err(|e| AppError::Io(e.to_string()))?;
+    cb.set_text(text).map_err(|e| AppError::Io(e.to_string()))
+}
+
+/// 读剪贴板文本，给小窗的「粘贴」按钮用。读不到（空 / 非文本）就给空串，
+/// 不当成错误——按钮点一下没反应比弹个错更合适。
+#[tauri::command]
+fn read_clipboard_text() -> String {
+    arboard::Clipboard::new()
+        .ok()
+        .and_then(|mut c| c.get_text().ok())
+        .unwrap_or_default()
 }
 
 #[tauri::command]
@@ -780,7 +857,22 @@ pub fn run() {
         // 关闭事件挂在 Builder 上。状态在 setup 里才 manage，所以运行时再取，
         // 取不到就按「隐藏到托盘」处理，避免关窗直接杀掉进程导致热键失效。
         .on_window_event(|win, event| {
+            // 小窗是「唤出即用、用完就走」：失焦就藏起来，符合直觉，
+            // 也省得用户非要按一次 Esc。
+            if let tauri::WindowEvent::Focused(false) = event {
+                if win.label() == "mini" {
+                    let _ = win.hide();
+                }
+                return;
+            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // popup / mini 都是常驻窗口，关闭只隐藏。真销毁了就再也弹不
+                // 出来，除非重启应用。
+                if win.label() == "popup" || win.label() == "mini" {
+                    api.prevent_close();
+                    let _ = win.hide();
+                    return;
+                }
                 let close_to_tray = win
                     .app_handle()
                     .try_state::<AppState>()
@@ -799,20 +891,28 @@ pub fn run() {
             });
 
             let handle = app.handle().clone();
-            let hotkey = {
+            let snapshot = {
                 let st = handle.state::<AppState>();
-                let guard = st.settings.lock().unwrap();
                 // 显式绑定 guard：块尾表达式里的临时值会活到块末，比 st 还晚，
                 // 那样会让借用活得比它依赖的 State 更久，编译不过。
-                let hk = guard.hotkey_toggle.clone();
-                hk
+                let guard = st.settings.lock().unwrap();
+                let s = guard.clone();
+                s
             };
 
             tray::build_tray(&handle)?;
-            match tray::rebind_hotkey(&handle, &hotkey) {
-                Ok(()) => tray::notify_hotkey(&handle, true, format!("全局热键已注册：{hotkey}")),
-                Err(e) => tray::notify_hotkey(&handle, false, e),
-            }
+            // 两个热键一起注册（共用一次 unregister_all）。结果走事件推给前端，
+            // 但 setup 早于前端挂载 listen，那条事件必然被丢——所以界面挂载后
+            // 会主动查一次 hotkey_status。
+            tray::apply_hotkeys(&handle, &snapshot);
+
+            // 划词翻译：开着才拉全局鼠标监听
+            let (sel_on, sel_mod) = {
+                let st = handle.state::<AppState>();
+                let guard = st.settings.lock().unwrap();
+                (guard.selection_enabled, guard.selection_modifier.clone())
+            };
+            selection::configure(&handle, sel_on, &sel_mod);
 
             Ok(())
         })
@@ -826,6 +926,12 @@ pub fn run() {
             get_autostart,
             set_autostart,
             show_window,
+            hide_mini,
+            selection_status,
+            hide_selection_popup,
+            take_pending_selection,
+            copy_text,
+            read_clipboard_text,
             set_active_backend,
             set_api_key,
             test_backend,

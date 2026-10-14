@@ -22,6 +22,36 @@
         "label": "main",
         "decorations": false,
         "shadow": true
+      },
+      {
+        "label": "popup",
+        "title": "划词翻译",
+        "width": 460,
+        "height": 300,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "focusable": false,
+        "visible": false,
+        "theme": "Light"
+      },
+      {
+        "label": "mini",
+        "title": "快速翻译",
+        "width": 560,
+        "height": 320,
+        "minWidth": 420,
+        "minHeight": 200,
+        "resizable": true,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "center": true,
+        "visible": false,
+        "theme": "Light"
       }
     ],
     "security": {
