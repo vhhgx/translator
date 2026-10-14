@@ -36,7 +36,10 @@ arboard = "3.6.1"
 
 [target.'cfg(windows)'.dependencies]
 uiautomation = { version = "0.25.1", default-features = false, features = ["control", "input", "pattern"] }
-windows-sys = { version = "0.59", features = ["Win32_Foundation"] }
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_UI_WindowsAndMessaging",
+] }
 
 [features]
 default = ["custom-protocol"]

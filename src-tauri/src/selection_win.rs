@@ -14,10 +14,43 @@
 
 use uiautomation::patterns::{UILegacyIAccessiblePattern, UITextPattern};
 use uiautomation::{UIElement, UIAutomation};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    GetForegroundWindow, GetWindowThreadProcessId,
+};
 
 /// 取词上限。PDF 阅读器、网页这类控件可能一次返回几万字符，
 /// 全量丢给模型既慢又会挤爆上下文，截断更实际。
 const MAX_CHARS: usize = 5000;
+
+/// 当前前台窗口所属进程；取不到返回 None。
+///
+/// 单独抽出来是为了能直接单测，不必真去开一个窗口。
+fn foreground_pid() -> Option<u32> {
+    let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd.is_null() {
+        return None;
+    }
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(hwnd, &raw mut pid) };
+    (pid != 0).then_some(pid)
+}
+
+/// UIA 焦点所在进程是否就是当前前台窗口所属进程。
+///
+/// 这条校验是划词会不会「莫名其妙自己弹」的关键。
+///
+/// `IUIAutomation::GetFocusedElement` 返回的是**UIA 焦点**，它和 Windows
+/// 的真实前台焦点**不是一回事**：点进一个不参与 UIA 的地方（任务栏、桌面、
+/// 游戏、某些工具窗口）时，Windows 的前台已经换人了，但 UIA 焦点可能仍旧
+/// 留在上一个文本控件上——**而那个控件的选区通常还在**。
+///
+/// 不校验的话，用户点一下任务栏，我们就把上一个窗口的旧选区又翻译一遍，
+/// 这正是「自己莫名唤出、且无法稳定复现」的来源。
+///
+/// 取不到前台进程就当作「不是」：宁可这次不划词。
+fn focus_is_foreground(element_pid: u32) -> bool {
+    foreground_pid() == Some(element_pid)
+}
 
 /// 读当前焦点控件的选中文字；没有选区、或控件不支持 UIA 时返回 None。
 pub fn selected_text() -> Option<String> {
@@ -28,14 +61,17 @@ pub fn selected_text() -> Option<String> {
 
     // 焦点落在本应用自己身上就放弃。弹窗是 alwaysOnTop 的，弹出过程会
     // 改变焦点；不挡住的话容易自激成「弹窗→取到弹窗文字→再弹窗」。
-    if element.get_process_id().ok()? == std::process::id() {
+    let element_pid = element.get_process_id().ok()?;
+    if element_pid == std::process::id() {
         return None;
     }
 
-    let text = match read_selection(&element) {
-        Some(t) => t,
-        None => return None,
-    };
+    // 见 focus_is_foreground 的注释：UIA 焦点可能还停在上一个应用上。
+    if !focus_is_foreground(element_pid) {
+        return None;
+    }
+
+    let text = read_selection(&element)?;
 
     let text = text.trim();
     if text.is_empty() {

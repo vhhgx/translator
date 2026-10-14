@@ -80,6 +80,8 @@ static CURSOR_X: AtomicI32 = AtomicI32::new(0);
 static CURSOR_Y: AtomicI32 = AtomicI32::new(0);
 
 static LAST_FIRE: Mutex<Option<Instant>> = Mutex::new(None);
+/// 上一次推给弹窗的原文。用来识别「选区还在、又点了一下」的重复触发。
+static LAST_SHOWN: Mutex<Option<String>> = Mutex::new(None);
 /// `rdev::listen` 起不来时的原因（Wayland、无 X11 等），留给设置页展示。
 static START_ERROR: Mutex<Option<String>> = Mutex::new(None);
 /// 待弹窗处理的文本。
@@ -160,6 +162,8 @@ pub fn hide(app: &AppHandle) {
     if let Some(w) = app.get_webview_window(POPUP_LABEL) {
         if w.is_visible().unwrap_or(false) {
             let _ = w.hide();
+            // 弹窗没了，下次同样的文字就是「重新选的」，该弹还得弹。
+            LAST_SHOWN.lock().unwrap().take();
         }
     }
 }
@@ -246,10 +250,9 @@ fn on_event(app: &AppHandle, event: EventType) {
             }
         }
         EventType::ButtonRelease(Button::Left) => {
-            // 在本应用自己的窗口里点击是一次界面交互，不是划词。这里必须拦：
-            // capture_selected_text 会把合成的 Ctrl+C 打进当前焦点窗口，
-            // 录热键时设置页正收着 keydown，会把那串 Ctrl+C 当成用户按下的组合键
-            // 收走并注册成全局热键——之后每次点按钮都会触发它，主窗口就被 hide 掉。
+            // 在本应用自己的窗口里点击是一次界面交互，不是划词，必须拦在前面。
+            // 录制热键时设置页正收着 keydown，早先剪贴板路径往这里打进过
+            // 合成按键，把热键收走并注册成全局热键，主窗口直接被 hide。
             //
             // 放在 debounce_ok() 之前判断：界面内的点击不应该消耗掉去抖窗口，
             // 否则紧接着的正常划词会被误判成频率过高而丢掉。
@@ -276,7 +279,27 @@ fn capture_and_show(app: &AppHandle) {
     if text.is_empty() {
         return;
     }
+
+    // 弹窗已经开着、内容又和上一次一模一样 —— 这不是用户重新选了一次，
+    // 而是**旧选区还在**。选完文字后，点滚动条、点工具栏、点窗口里的非文本
+    // 区域都不会清掉选区，UIA 焦点也仍在那个文本控件上，于是每次这样的点击
+    // 都会把同一段文字再取一遍。再弹一次只会闪给用户看。
+    if popup_is_showing(app) && last_shown() == text {
+        return;
+    }
+
+    *LAST_SHOWN.lock().unwrap() = Some(text.to_string());
     show_popup(app, text);
+}
+
+fn last_shown() -> String {
+    LAST_SHOWN.lock().unwrap().clone().unwrap_or_default()
+}
+
+fn popup_is_showing(app: &AppHandle) -> bool {
+    app.get_webview_window(POPUP_LABEL)
+        .and_then(|w| w.is_visible().ok())
+        .unwrap_or(false)
 }
 
 /// 等模拟 Ctrl+C 之后剪贴板被改写的上限。超时就当这次没复制到东西。
