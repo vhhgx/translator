@@ -309,7 +309,10 @@ fn set_api_key(state: State<'_, AppState>, backend_id: String, api_key: String) 
 /// Probe a backend and return the models it advertises.
 #[tauri::command]
 async fn test_backend(backend: Backend) -> Result<Vec<String>, String> {
-    client::check_health(&backend).await
+    // 密钥存在系统凭据库里，Backend 结构体中只有 has_api_key 这个标记位，
+    // 得现取，否则探测永远是无凭证的，外部后端一律 401。
+    let key = config::load_secret(&backend.id);
+    client::check_health(&backend, key.as_deref()).await
 }
 
 // ---------- translate ----------

@@ -43,12 +43,18 @@ pub struct TranslateResponse {
     pub history_id: Option<String>,
 }
 
-/// 剥到 API 根地址：容忍用户把 baseurl 填成 `/v1` 甚至完整的
-/// `/v1/chat/completions`，三种写法都归一到同一个根。
+/// 剥到 API 根地址：容忍用户把 baseurl 填成 `/v1`、完整的
+/// `/v1/chat/completions`，甚至从厂商文档里复制的 Anthropic `/v1/messages`
+/// 或 Responses `/v1/responses`，几种写法都归一到同一个根。
+///
+/// 厂商文档常常把三种协议的完整 URL 并排列出，用户随手抄一栏就填进来了。
+/// 本客户端只讲 OpenAI Chat Completions，所以一律剥回根再自己拼。
 fn api_root(base_url: &str) -> String {
     let trimmed = base_url.trim_end_matches('/');
-    let without_path = trimmed
-        .strip_suffix("/chat/completions")
+    const PROTOCOL_PATHS: [&str; 3] = ["/chat/completions", "/messages", "/responses"];
+    let without_path = PROTOCOL_PATHS
+        .iter()
+        .find_map(|p| trimmed.strip_suffix(p))
         .unwrap_or(trimmed)
         .trim_end_matches('/');
     without_path
@@ -63,6 +69,10 @@ fn endpoint(base_url: &str) -> String {
     // /v1/v1/chat/completions —— 服务端只会回 404。
     if trimmed.ends_with("/chat/completions") {
         trimmed.to_string()
+    } else if trimmed.ends_with("/messages") || trimmed.ends_with("/responses") {
+        // 抄成了别的协议路径。剥回根再拼 chat/completions，
+        // 不然会拼出 /messages/v1/chat/completions 这种没人认得的地址。
+        format!("{}/v1/chat/completions", api_root(base_url))
     } else if trimmed.ends_with("/v1") {
         format!("{trimmed}/chat/completions")
     } else {
@@ -90,33 +100,70 @@ fn completion_budget(prompt: &str) -> u32 {
     remaining.clamp(256, CONTEXT_TOKENS / 2) as u32
 }
 
-pub async fn check_health(backend: &Backend) -> Result<Vec<String>, String> {
+/// 探测后端是否可用，顺带把模型列表带回来给界面显示。
+///
+/// 先打 OpenAI 标准的 `/v1/models`：它一举两得——能验 key（401 就说明 key
+/// 不对），也能把模型名捞回来。只有它走不通时才退回 `/health`。
+///
+/// 顺序不能反。`/health` 是 llama-server 这类本地服务才有的扩展，中转站
+/// （new-api / one-api / 各家云服务）压根没这个路径，先打它只会拿到一个
+/// 毫无信息量的 404，把「后端是好的」误报成「后端坏了」。
+pub async fn check_health(backend: &Backend, api_key: Option<&str>) -> Result<Vec<String>, String> {
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(8))
         .build()
         .map_err(|e| e.to_string())?;
-    let url = health_url(&backend.base_url);
-    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
-    if !resp.status().is_success() {
-        return Err(format!("HTTP {}", resp.status()));
-    }
-    // Try the models endpoint for a friendly display, but don't require it.
+
+let key = api_key.filter(|k| !k.is_empty());
     let models_url = format!("{}/v1/models", api_root(&backend.base_url));
-    if let Ok(m) = client.get(&models_url).send().await {
-        if let Ok(json) = m.json::<serde_json::Value>().await {
-            if let Some(arr) = json.get("data").and_then(|d| d.as_array()) {
-                let ids: Vec<String> = arr
-                    .iter()
-                    .filter_map(|v| v.get("id").and_then(|i| i.as_str()))
-                    .map(|s| s.to_string())
-                    .collect();
-                if !ids.is_empty() {
-                    return Ok(ids);
+    let mut probe = client.get(&models_url);
+    if let Some(k) = key {
+        probe = probe.bearer_auth(k);
+    }
+
+    // 记下第一次探测的结果：失败时要把两个地址各自的真实状态一起报给用户，
+    // 只报最后一个会把问题指向错误的地址。
+    let models_status = match probe.send().await {
+        Ok(resp) if resp.status().is_success() => {
+            // 拿到模型列表就收工；解析不出来也不该算失败——能连通就够了。
+            if let Ok(json) = resp.json::<serde_json::Value>().await {
+                if let Some(arr) = json.get("data").and_then(|d| d.as_array()) {
+                    let ids: Vec<String> = arr
+                        .iter()
+                        .filter_map(|v| v.get("id").and_then(|i| i.as_str()))
+                        .map(|s| s.to_string())
+                        .collect();
+                    if !ids.is_empty() {
+                        return Ok(ids);
+                    }
                 }
             }
+            return Ok(vec![backend.model.clone()]);
         }
+        Ok(resp) if resp.status() == reqwest::StatusCode::UNAUTHORIZED => {
+            return Err(if key.is_some() {
+                "密钥无效或已过期（服务端返回 401）".to_string()
+            } else {
+                "该后端需要 API key —— 填在下方「API Key」里并保存".to_string()
+            });
+        }
+        // 其余状态（404/405/5xx）说明这个后端不提供 /v1/models，交给下面的
+        // /health 兜底，不要在这里就下结论。
+        Ok(resp) => format!("HTTP {}", resp.status()),
+        Err(e) => format!("{e}"),
+    };
+
+    // 兜底：本地服务自带的健康检查。
+    let health = health_url(&backend.base_url);
+    match client.get(&health).send().await {
+        Ok(resp) if resp.status().is_success() => Ok(vec![backend.model.clone()]),
+        Ok(resp) => Err(format!(
+            "{} 返回 {models_status}，{} 返回 HTTP {}。\
+             Base URL 填到域名就行，别带 /v1/messages 这类接口路径。",
+            models_url, health, resp.status()
+        )),
+        Err(e) => Err(format!("{} 返回 {models_status}；{health} 连不上：{e}", models_url)),
     }
-    Ok(vec![backend.model.clone()])
 }
 
 /// Build the final prompt for a request. Split out so tests can call it directly.
@@ -442,6 +489,27 @@ mod tests {
             "http://x/v1/chat/completions"
         );
         assert_eq!(health_url("http://127.0.0.1:8080"), "http://127.0.0.1:8080/health");
+    }
+
+    /// 厂商文档把三种协议的完整 URL 并排列出，很容易抄错一栏；
+    /// 三种填法都应归一到同一个 OpenAI Chat Completions 端点。
+    #[test]
+    fn endpoint_accepts_any_documented_protocol_url() {
+        const EXPECTED: &str = "https://rong-ai.com/v1/chat/completions";
+        assert_eq!(endpoint("https://rong-ai.com/v1/chat/completions"), EXPECTED);
+        assert_eq!(endpoint("https://rong-ai.com/v1/messages"), EXPECTED);
+        assert_eq!(endpoint("https://rong-ai.com/v1/responses"), EXPECTED);
+        assert_eq!(endpoint("https://rong-ai.com/v1"), EXPECTED);
+        assert_eq!(endpoint("https://rong-ai.com/"), EXPECTED);
+        assert_eq!(endpoint("https://rong-ai.com"), EXPECTED);
+        for form in [
+            "https://rong-ai.com/v1/chat/completions",
+            "https://rong-ai.com/v1/messages",
+            "https://rong-ai.com/v1/responses",
+        ] {
+            assert_eq!(api_root(form), "https://rong-ai.com", "api_root({form})");
+            assert_eq!(health_url(form), "https://rong-ai.com/health", "health_url({form})");
+        }
     }
 
     /// baseurl 带 /v1 是最常见的写法，拼错就会得到 /v1/v1/chat/completions。

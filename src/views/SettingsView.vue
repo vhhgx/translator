@@ -212,14 +212,39 @@ async function test(b: Backend) {
   }
 }
 
+/**
+ * 换 Key：填了才换。
+ *
+ * 留空**不等于**删除——输入框在已有 key 时也是空着的（不回显密钥），
+ * 空这个状态本身有歧义。用户回到这张卡片看到空框，随手点一下「保存」就
+ * 把正在用的凭据清掉了，下一次翻译才报 401，隔了半天才反应过来。
+ * 所以「没打算改」就什么都不做，删除交给单独的按钮。
+ */
 async function saveKey(b: Backend) {
+  const key = (keyInputs.value[b.id] ?? '').trim()
+  if (!key) {
+    toast(b.has_api_key ? '未输入新 Key，未做修改' : '还没有 Key 可保存')
+    return
+  }
   try {
-    const key = keyInputs.value[b.id] ?? ''
     await api.setApiKey(b.id, key)
     keyInputs.value[b.id] = ''
-    b.has_api_key = !b.has_api_key || !!key
+    b.has_api_key = true
     await saveSettings()
-    toast(key ? 'API key 已保存到系统凭据库' : 'API key 已清除', 'success')
+    toast('API key 已保存到系统凭据库', 'success')
+  } catch (e) {
+    err(e)
+  }
+}
+
+/** 删除 Key 是破坏性动作，必须显式触发，不跟「保存」共用一个空输入。 */
+async function clearKey(b: Backend) {
+  try {
+    await api.setApiKey(b.id, '')
+    keyInputs.value[b.id] = ''
+    b.has_api_key = false
+    await saveSettings()
+    toast('API key 已删除', 'success')
   } catch (e) {
     err(e)
   }
@@ -467,8 +492,17 @@ const APP_VERSION = '0.1.0'
           <div class="backend__body">
             <div class="backend__row">
               <div class="backend__field backend__field--url">
-                <label class="backend__label">Base URL</label>
-                <input v-model="b.base_url" class="input" placeholder="http://127.0.0.1:8080" @change="saveSettings()" />
+                <label class="backend__label">
+                  Base URL
+                  <!-- 厂商文档常把三种协议的完整路径并排列出，很容易抄错一栏 -->
+                  <span class="backend__key-tag">只填到域名，不带 /v1/...</span>
+                </label>
+                <input
+                  v-model="b.base_url"
+                  class="input"
+                  placeholder="https://api.example.com"
+                  @change="saveSettings()"
+                />
               </div>
               <div class="backend__field">
                 <label class="backend__label">模型名</label>
@@ -483,8 +517,21 @@ const APP_VERSION = '0.1.0'
                 <span v-else class="backend__key-tag">未设置（本地服务通常不需要）</span>
               </label>
               <div class="backend__key">
-                <input v-model="keyInputs[b.id]" class="input" type="password" placeholder="留空并保存 = 清除 key" />
+                <input
+                  v-model="keyInputs[b.id]"
+                  class="input"
+                  type="password"
+                  :placeholder="b.has_api_key ? '已保存，留空表示不修改' : '粘贴 API Key'"
+                />
                 <button class="btn btn--sm" @click="saveKey(b)">保存 Key</button>
+                <button
+                  v-if="b.has_api_key"
+                  class="btn btn--sm backend__key-del"
+                  title="从系统凭据库中删除这把 Key"
+                  @click="clearKey(b)"
+                >
+                  删除
+                </button>
               </div>
             </div>
           </div>
@@ -984,6 +1031,13 @@ const APP_VERSION = '0.1.0'
 .backend__key {
   display: flex;
   gap: 8px;
+}
+
+/* 删除 Key：默认低调，hover 才示警——破坏性动作不该跟「保存」一样显眼 */
+.backend__key-del:hover {
+  color: var(--status-danger);
+  border-color: color-mix(in srgb, var(--status-danger) 45%, transparent);
+  background: var(--status-danger-bg);
 }
 
 .backend__result {

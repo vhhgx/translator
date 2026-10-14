@@ -100,7 +100,9 @@ async fn health_check_reports_online() {
     if !online() {
         return;
     }
-    let models = client::check_health(&backend()).await;
+    // 外部后端要带 key 才能过 /v1/models，用 HYMT_KEY 传；本地服务留空即可。
+    let key = std::env::var("HYMT_KEY").ok();
+    let models = client::check_health(&backend(), key.as_deref()).await;
     assert!(models.is_ok(), "health check failed: {:?}", models);
     eprintln!("models: {:?}", models.unwrap());
 }
