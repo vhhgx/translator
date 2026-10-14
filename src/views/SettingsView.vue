@@ -304,7 +304,11 @@ async function removeBackend(b: Backend) {
       <label class="row">
         <span class="row__label">
           划词触发修饰键
-          <em class="row__hint">不要求修饰键时，任何拖选都会弹窗，容易吵</em>
+          <em class="row__hint"
+            >不要求修饰键时，系统里的**每一次左键点击**都会触发一次划词抓取，而抓取靠的是
+            借剪贴板中转（写哨兵 → 模拟 Ctrl+C → 读回），期间剪贴板会被短暂替换。
+            建议改成按住 Ctrl，用拖选 + Ctrl 才触发。</em
+          >
         </span>
         <select
           v-model="settings.selection_modifier"

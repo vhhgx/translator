@@ -847,7 +847,7 @@ pub fn run() {
     let settings = Settings::load();
     let glossary = Glossary::load();
 
-tauri::Builder::default()
+    tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
@@ -921,6 +921,8 @@ tauri::Builder::default()
                 (guard.selection_enabled, guard.selection_modifier.clone())
             };
             selection::configure(&handle, sel_on, &sel_mod);
+            // 上个进程若死在捕获窗口里，哨兵会留在用户剪贴板上，启动时清掉。
+            selection::repair_clipboard();
 
             Ok(())
         })

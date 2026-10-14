@@ -27,6 +27,29 @@ const DEBOUNCE: Duration = Duration::from_millis(400);
 const OFFSET: (i32, i32) = (14, 20);
 /// 贴屏幕边缘时保留的空隙。
 const MARGIN: i32 = 8;
+/// 等模拟 Ctrl+C 之后剪贴板被改写的上限。超时就当这次没复制到东西。
+const CAPTURE_TIMEOUT: Duration = Duration::from_millis(200);
+/// 哨兵前缀。既是哨兵的格式，也是启动自愈时识别残留的依据。
+const SENTINEL_PREFIX: &str = "hymt2-sentinel-";
+
+/// 启动自愈：清掉上一次残留的哨兵。
+///
+/// 哨兵的生命周期只有捕获那 ~250ms，可进程要是正好死在窗口里（开发时热重载、
+/// 用户从任务管理器结束、或崩溃），这次哨兵就没人还原了，会留在用户剪贴板上。
+/// 更麻烦的是它会自我繁殖：下一次捕获读到 `old` 是哨兵，还原时又写回一个
+/// 哨兵，于是剪贴板被永久毒化——用户表现为「复制什么都不进去了」。
+///
+/// 残留的原文已经随上一个进程一起没了，没法还原，但至少不能让它一直挂在
+/// 剪贴板上等用户粘出一串乱码。
+pub fn repair_clipboard() {
+    if let Ok(mut cb) = arboard::Clipboard::new() {
+        if let Ok(text) = cb.get_text() {
+            if text.starts_with(SENTINEL_PREFIX) {
+                let _ = cb.set_text(String::new());
+            }
+        }
+    }
+}
 
 /// 关闭时只是不再抓文本；监听线程一旦起来就不再卸载（rdev 没有 unlisten）。
 static ENABLED: AtomicBool = AtomicBool::new(false);
@@ -244,17 +267,50 @@ fn clipboard_text() -> Option<String> {
     arboard::Clipboard::new().ok()?.get_text().ok()
 }
 
+/// 判断剪贴板里现在这份内容是不是我们写的，从而决定要不要还原。
+///
+/// 抽成纯函数是为了能单独测——这段要是判错，表现就是「用户刚复制的内容
+/// 凭空消失」，而在真机上很难复现出来看。
+fn should_restore(current: Option<&str>, captured: Option<&str>, sentinel: &str) -> bool {
+    match (current, captured) {
+        // 模拟的 Ctrl+C 没复制到东西，剪贴板还是哨兵 → 我们弄的
+        (Some(cur), _) if cur == sentinel => true,
+        // 剪贴板内容等于我们模拟复制到的结果 → 也是我们弄的
+        (Some(cur), Some(cap)) if cur == cap => true,
+        // 读回失败、而剪贴板此时也读不出来：内容多半就是我们清掉后没人写
+        (None, None) => true,
+        _ => false,
+    }
+}
+
 /// 抓取当前选中的文本；没选中或剪贴板不是文本时返回 None。
 ///
 /// 剪贴板里放的不是文本（图片等）时**直接放弃**：那种内容没法安全地存下来
 /// 再还原，宁可这次不划词，也不要把用户的东西弄丢。
+///
+/// 这里有两件事必须做对，否则用户会觉得「复制坏了」：
+///
+/// 1. **哨兵不能用空串。** 以前放的是空串，于是捕获那 ~160ms 里剪贴板
+///    是真空的，用户这段时间复制的东西看起来就没进去，粘贴也是空的。
+///    换成一段唯一文本，这段时间剪贴板始终有内容。
+/// 2. **还原必须有条件。** 以前是无条件写回 old，于是「划词刚结束、用户
+///    紧接着按的 Ctrl+C」会被 old 覆盖掉——用户刚复制的内容凭空消失。
+///    现在交给 should_restore 判断：还是哨兵、或等于我们自己复制到的，
+///    才认为是我们弄的、可以还原；期间用户自己复制过的，一律不碰。
 fn capture_selected_text() -> Option<String> {
-    let previous = clipboard_text()?;
+    let old = clipboard_text()?;
+
+    // 唯一串：同一个进程连续触发也不会撞。
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let sentinel = format!("{SENTINEL_PREFIX}{}-{}", std::process::id(), stamp);
 
     {
         let mut cb = arboard::Clipboard::new().ok()?;
-        // 哨兵：清空。若这次 Ctrl+C 什么都没选中，读回来就还是空的。
-        cb.set_text(String::new()).ok()?;
+        // 哨兵。若这次 Ctrl+C 什么都没选中，读回来就还是它。
+        cb.set_text(sentinel.clone()).ok()?;
     }
     std::thread::sleep(Duration::from_millis(40));
 
@@ -273,17 +329,32 @@ fn capture_selected_text() -> Option<String> {
     let _ = rdev::simulate(&EventType::KeyPress(Key::KeyC));
     let _ = rdev::simulate(&EventType::KeyRelease(Key::KeyC));
     let _ = rdev::simulate(&EventType::KeyRelease(Key::ControlLeft));
-    std::thread::sleep(Duration::from_millis(120));
 
-    let captured = clipboard_text();
+    // 轮询等剪贴板被改写，而不是固定睡 120ms。
+    //
+    // 这个窗口的宽度直接决定「用户点完鼠标紧接着按的 Ctrl+C」会不会被我们
+    // 还原掉：固定睡 120ms 的话，那 120ms 里用户复制的内容和我们模拟出来的
+    // 内容在剪贴板里长得一模一样，事后分不出是谁写的，只能赌自己那份。
+    // 改成一旦发现变化就立刻停，窗口从 120ms 压到几毫秒，撞上的概率
+    // 基本可以忽略。
+    let deadline = Instant::now() + CAPTURE_TIMEOUT;
+    let mut captured = clipboard_text();
+    while captured.as_deref() == Some(sentinel.as_str()) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(4));
+        captured = clipboard_text();
+    }
 
-    // 把用户原来的剪贴板放回去
+    // 有条件地还原：只回滚我们自己造成的改动。
     if let Ok(mut cb) = arboard::Clipboard::new() {
-        let _ = cb.set_text(previous);
+        let now = cb.get_text().ok();
+        if should_restore(now.as_deref(), captured.as_deref(), &sentinel) {
+            let _ = cb.set_text(old);
+        }
     }
 
     let text = captured?;
-    if text.trim().is_empty() {
+    // 读回哨兵 = 这次点击压根没选中东西。
+    if text == sentinel || text.trim().is_empty() {
         None
     } else {
         Some(text)
@@ -326,4 +397,56 @@ fn show_popup(app: &AppHandle, text: &str) {
     // 先把文本推过去再显示，避免弹出一个空窗再闪内容
     let _ = app.emit_to(POPUP_LABEL, "hymt2:selection", serde_json::json!({ "text": text }));
     let _ = win.show();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const S: &str = "hymt2-sentinel-1-2";
+
+    #[test]
+    fn 没选中时剪贴板仍是哨兵_还原() {
+        // 模拟 Ctrl+C 什么都没复制到，剪贴板还是我们放的哨兵。
+        assert!(should_restore(Some(S), Some(S), S));
+    }
+
+    #[test]
+    fn 复制到了东西_是我们写的_还原() {
+        // 剪贴板内容等于模拟复制的结果，说明是我们造成的改动。
+        assert!(should_restore(Some("划中的文字"), Some("划中的文字"), S));
+    }
+
+    #[test]
+    fn 期间用户自己复制了_绝不还原() {
+        // 这是本 bug 的核心：用户划完词紧接着按 Ctrl+C，
+        // 那份内容不能被划词前的旧内容盖掉。
+        assert!(!should_restore(Some("用户刚复制的"), Some("划中的文字"), S));
+    }
+
+    #[test]
+    fn 读回失败且剪贴板为空_还原() {
+        assert!(should_restore(None, None, S));
+    }
+
+    #[test]
+    fn 读回失败但剪贴板有内容_不还原() {
+        assert!(!should_restore(Some("别的进程写的"), None, S));
+    }
+
+    #[test]
+    fn 哨兵每次都不同() {
+        // 哨兵必须唯一，否则「用户复制的内容恰好等于上一轮哨兵」会被误判。
+        let mk = || {
+            format!(
+                "hymt2-sentinel-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0)
+            )
+        };
+        assert_ne!(mk(), mk());
+    }
 }
