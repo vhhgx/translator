@@ -44,6 +44,9 @@ export const api = {
   getMeta: () => invoke<Meta>('get_meta'),
   getSettings: () => invoke<Settings>('get_settings'),
   saveSettings: (s: Settings) => invoke<void>('save_settings', { s }),
+  // 把当前主题偏好告诉后端：主题只存 localStorage，Rust 读不到，
+  // 而托盘菜单的主题子菜单要给对勾，得由前端喂一次。
+  reportTheme: (mode: string) => invoke<void>('report_theme', { mode }),
   setActiveBackend: (id: string) => invoke<void>('set_active_backend', { id }),
   setApiKey: (backendId: string, apiKey: string) =>
     invoke<{ backend_id: string; has_key: boolean }>('set_api_key', { backendId, apiKey }),

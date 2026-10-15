@@ -7,6 +7,7 @@
  */
 
 import { ref } from 'vue'
+import { listen } from '@tauri-apps/api/event'
 
 export type ThemeMode = 'auto' | 'light' | 'dark'
 export type ResolvedTheme = 'light' | 'dark'
@@ -39,6 +40,8 @@ export function initTheme() {
   initialized = true
   themeMode.value = readMode()
   apply()
+  // 冷启动就把偏好喂给后端，否则托盘菜单的主题对勾会一直停在「跟随系统」
+  report()
   window
     .matchMedia('(prefers-color-scheme: dark)')
     .addEventListener('change', () => {
@@ -60,8 +63,28 @@ export function setThemeMode(mode: ThemeMode) {
   themeMode.value = mode
   localStorage.setItem(KEY, mode)
   apply()
+  report()
+}
+
+/**
+ * 把偏好告诉后端，托盘菜单的主题子菜单靠它打对勾。
+ * 浏览器预览没有 IPC，失败静默——那里根本没有托盘。
+ */
+function report() {
+  void import('../api')
+    .then((m) => m.api.reportTheme(themeMode.value))
+    .catch(() => {})
 }
 
 export function useTheme() {
   return { themeMode, resolvedTheme, setThemeMode }
+}
+
+/** 托盘里切主题走的就是这条事件，和设置页的按钮是同一条路。 */
+export function listenThemeFromTray() {
+  void listen<{ mode: ThemeMode }>('hymt2:theme', (e) => {
+    if (e.payload.mode === 'light' || e.payload.mode === 'dark' || e.payload.mode === 'auto') {
+      setThemeMode(e.payload.mode)
+    }
+  }).catch(() => {})
 }

@@ -142,7 +142,16 @@ fn save_settings(
     *state.settings.lock().unwrap() = s;
     // 开关一变就同步给监听线程；打开时才真正拉起钩子。
     selection::configure(&app, sel_on, &sel_mod);
+    // 设置页改了引擎列表或开关，托盘菜单里的对勾和子菜单要跟着重建
+    tray::rebuild_menu(&app);
     Ok(())
+}
+
+/// 前端把当前主题偏好报给后端：主题只存在 localStorage，Rust 读不到，
+/// 而托盘菜单的主题子菜单要给对勾，得由前端喂一次。
+#[tauri::command]
+fn report_theme(app: tauri::AppHandle, mode: String) {
+    tray::set_theme_cache(&app, &mode);
 }
 
 // ---------- 请求日志 ----------
@@ -892,7 +901,7 @@ async fn doc_translate(
     let out_path = out_path
         .filter(|p| !p.trim().is_empty())
         .unwrap_or_else(|| document::output_path(&path, &target_lang));
-    let content = document::reassemble(&doc.segments, &results);
+    let content = document::write_back(&doc, &results)?;
     document::save(&out_path, &content)?;
 
     Ok(DocProgress {
@@ -1229,6 +1238,7 @@ pub fn run() {
             get_meta,
             get_settings,
             save_settings,
+            report_theme,
             set_hotkey,
             get_hotkey,
             hotkey_status,

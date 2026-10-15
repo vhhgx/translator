@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from 'vue'
 import { getCurrentWindow } from '@tauri-apps/api/window'
+import { listen } from '@tauri-apps/api/event'
 import {
   BookOpen,
   Clock3,
@@ -17,7 +18,7 @@ import {
 } from '@lucide/vue'
 import { toasts } from './api'
 import { glossary, historyCount, reloadAll, settings, tab } from './composables/useAppState'
-import { setThemeMode, useTheme } from './composables/useTheme'
+import { setThemeMode, listenThemeFromTray, useTheme } from './composables/useTheme'
 import BackendPicker from './components/BackendPicker.vue'
 import BatchView from './views/BatchView.vue'
 import DocumentView from './views/DocumentView.vue'
@@ -100,6 +101,21 @@ onMounted(() => {
 })
 
 onUnmounted(() => window.removeEventListener('resize', syncMaximized))
+
+// ---------- 托盘联动 ----------
+// 菜单里切了引擎/开关后，后端会发一条 settings-changed，界面据此重新拉配置，
+// 否则底部的引擎胶囊还停在旧值。
+listen('hymt2:settings-changed', () => {
+  void reloadAll()
+}).catch(() => {})
+
+// 「打开设置」「打开术语库」两条菜单项走这条事件。
+listen<{ tab: Tab }>('hymt2:navigate', (e) => {
+  tab.value = e.payload.tab
+}).catch(() => {})
+
+// 托盘里的主题子菜单与设置页的按钮共用 useTheme 的同一条路径
+listenThemeFromTray()
 
 function go(t: Tab) {
   tab.value = t
