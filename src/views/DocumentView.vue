@@ -91,7 +91,10 @@ async function pick() {
     const path = await open({
       title: '选择文档',
       multiple: false,
-      filters: [{ name: '文本文档 / Markdown', extensions: ['txt', 'md', 'markdown'] }]
+      filters: [
+        { name: '文本文档 / Markdown', extensions: ['txt', 'md', 'markdown'] },
+        { name: '表格', extensions: ['csv', 'tsv'] }
+      ]
     })
     if (path) await load(path)
   } catch (e) {
@@ -107,7 +110,10 @@ async function pick() {
  * 真实文件路径（安全限制）。必须走 Tauri 自己的 onDragDropEvent，它的
  * payload 里是真实路径。
  */
-const DRAG_EXT = ['txt', 'md', 'markdown']
+const DRAG_EXT = ['txt', 'md', 'markdown', 'csv', 'tsv']
+
+/** 提示文案里的格式清单，跟 DRAG_EXT 同源，免得改一处漏一处。 */
+const DOC_EXTS_LABEL = '.txt / .md / .csv / .tsv'
 let unlistenDrag: (() => void) | null = null
 
 onMounted(async () => {
@@ -124,7 +130,7 @@ onMounted(async () => {
         if (!path) return
         const ext = path.split('.').pop()?.toLowerCase() ?? ''
         if (!DRAG_EXT.includes(ext)) {
-          toast(`只支持 .txt / .md，收到 .${ext}`, 'error')
+          toast(`只支持 ${DOC_EXTS_LABEL}，收到 .${ext}`, 'error')
           return
         }
         void load(path)
@@ -188,7 +194,15 @@ const KIND_LABEL: Record<string, string> = {
   table: '表格',
   quote: '引用',
   code: '代码',
-  frontmatter: '前言'
+  frontmatter: '前言',
+  cell: '单元格'
+}
+
+/** 顶部那行「这是什么格式」——表格要跟散文分开说法。 */
+const KIND_TITLE: Record<string, string> = {
+  markdown: 'Markdown',
+  txt: '纯文本',
+  table: '表格'
 }
 
 const kindCounts = computed(() => {
@@ -224,8 +238,7 @@ const fileName = computed(() => doc.value?.path.split(/[\\/]/).pop() ?? '')
             {{ fileName }}
           </span>
           <span class="doc__info">
-            {{ doc.kind === 'markdown' ? 'Markdown' : '纯文本' }} · {{ doc.lines }} 行 ·
-            {{ doc.encoding }}
+            {{ KIND_TITLE[doc.kind] ?? doc.kind }} · {{ doc.lines }} 行 · {{ doc.encoding }}
           </span>
         </template>
       </div>
@@ -309,9 +322,7 @@ const fileName = computed(() => doc.value?.path.split(/[\\/]/).pop() ?? '')
     <div v-if="!doc" class="dropzone" :class="{ 'dropzone--over': dragging }" @click="pick">
       <FileText :size="34" class="dropzone__icon" />
       <span class="dropzone__title">点击选择，或把文件拖到这里</span>
-      <span class="dropzone__hint">
-        支持 .txt / .md。自动识别 GBK / GB18030 / Big5 / UTF-16；Markdown 会保留标题、列表和代码块
-      </span>
+      <span class="dropzone__hint">支持 {{ DOC_EXTS_LABEL }}</span>
     </div>
 
     <!-- 段落预览 -->

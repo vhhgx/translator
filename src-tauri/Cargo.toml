@@ -26,6 +26,8 @@ tokio = { version = "1", features = ["full"] }
 keyring = { version = "3.6", features = ["windows-native", "sync-secret-service"] }
 encoding_rs = "0.8"
 rusqlite = { version = "0.32", features = ["bundled"] }
+# CSV/TSV 的引号转义、内嵌换行手写容易出错，交给成熟实现
+csv = "1"
 thiserror = "2"
 uuid = { version = "1", features = ["v4"] }
 dirs = "5"
