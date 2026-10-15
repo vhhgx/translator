@@ -1,0 +1,116 @@
+# 打 tag 出安装包：v1.0.0 → Windows NSIS + Linux deb/AppImage，同一个 Release。
+#
+# 版本号不从仓库里读，而是从 tag 解析后由 scripts/sync-version.mjs 写进那五处。
+# tag 因此是版本号的唯一真相源——「打什么 tag 就出什么版本的包」永远成立，
+# 不会出现界面写 1.0.0、exe 属性写 0.9.0 的情况。
+#
+# 本地手动发版：
+#   pnpm version:set 1.0.0 && git commit -am "chore: 1.0.0"
+#   git tag v1.0.0 && git push origin main --tags
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要发布的 tag，例如 v1.0.0'
+        required: true
+
+permissions:
+  contents: write
+
+# 连推两个 tag 时不让两次发布互相踩踏
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: 构建 ${{ matrix.name }}
+    # 一个平台挂掉不影响另一个平台把产物交上来——Windows 的包不该被 Linux 的
+    # 环境问题拖下水，反之亦然。
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - name: Linux
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: 安装 Linux 系统依赖
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libsoup-3.0-dev \
+            librsvg2-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            libdbus-1-dev \
+            cmake
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: ${{ matrix.target }}
+
+      - run: pnpm install --frozen-lockfile
+
+      # tag 是版本号的唯一真相源，构建前先把五处都对齐
+      - name: 同步版本号
+        run: node scripts/sync-version.mjs "${{ github.event.inputs.tag || github.ref_name }}"
+
+      - name: 构建
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # 矩阵各腿用同一个 tagName，产物自动汇到同一个 Release——
+          # 这是 tauri-action 文档化的多平台用法，不是先建 Release 再上传
+          tagName: ${{ github.event.inputs.tag || github.ref_name }}
+          releaseName: 'Zephyr Translator ${{ github.event.inputs.tag || github.ref_name }}'
+          releaseBody: |
+            ## 下载
+
+            | 平台 | 文件 |
+            | --- | --- |
+            | Windows x64 | `Zephyr Translator_*_x64-setup.exe` |
+            | Linux x64 | `*_amd64.deb`（Debian / Ubuntu）或 `*_amd64.AppImage`（通用） |
+
+            Windows 安装包未做代码签名，SmartScreen 会提示「未知发布者」，
+            点「更多信息 → 仍要运行」即可。
+
+            ## 使用
+
+            1. 启动后在底部状态栏「选择引擎」里选一个后端
+            2. 本地模型需要先跑 llama-server；云端后端在设置里填 Base URL 与 API Key
+            3. 全局热键与划词翻译在设置页配置
+
+            完整说明见 README。
+          releaseDraft: false
+          prerelease: false
+          args: --target ${{ matrix.target }}

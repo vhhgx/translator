@@ -31,6 +31,31 @@ Rust 只负责界面宿主与 IO —— 配置、凭据、HTTP 调用、文档�
 
 ## 30 秒上手
 
+想直接用，去 [**Releases**](https://github.com/vhhgx/translator/releases) 拿打好的包。
+
+| 平台 | 下载 | 说明 |
+| --- | --- | --- |
+| Windows x64 | `Zephyr Translator_*_x64-setup.exe` | NSIS 安装包，双击安装 |
+| Linux x64 (Debian / Ubuntu) | `*_amd64.deb` | `sudo apt install ./xxx.deb` |
+| Linux x64 (通用) | `*_amd64.AppImage` | 给上 `./xxx.AppImage` 加执行权限后直接跑 |
+
+装完做三件事就能用：
+
+1. 在**底部状态栏**左边的「选择引擎」里挑一个后端
+2. 本地模型需要先自己起 `llama-server`；云端后端去**设置 → 翻译引擎与模型**填 Base URL 和 API Key，点「测试连接」确认通了
+3. 全局热键、划词翻译在**设置 → 窗口唤起与热键**里配
+
+> **不想装模型？** 填一个云端 API 的地址和 key 就能直接用。工具不含模型，也不需要你装。
+
+**关于 SmartScreen**：Windows 安装包没做代码签名，首次安装会提示「Windows 已保护你的电脑」，
+点「更多信息 → 仍要运行」就行。这不是文件损坏，是没签名的正常表现。
+
+**暂不提供 macOS 版**。划词翻译在 macOS 上需要走 Accessibility 取词通道，目前还没实现，
+发一个划词失灵、又不公证（用户每次都得手动绕过 Gatekeeper）的包没有意义。Windows 和 Linux
+是完整的。
+
+### 从源码构建
+
 ```bash
 pnpm install
 pnpm app:dev          # 开发模式
@@ -38,11 +63,6 @@ pnpm app:build        # 打包 release
 ```
 
 首次 `cargo build` 冷编译约 3–8 分钟。
-
-打开后到「设置 → 翻译引擎与模型」，把某个后端的 Base URL、模型名、API Key 填好，点「测试连接」。
-底部状态栏切换后端，任何一次翻译都会走当前选中的那个。
-
-> **不想装模型？** 填一个云端 API 的地址和 key 就能直接用。工具不含模型，也不需要你装。
 
 ---
 
@@ -279,12 +299,18 @@ Linux 这套走的是 `src-tauri/tauri.linux.conf.json`（平台配置，Tauri �
 先装编译 WebKit 宿主的开发包：
 
 ```bash
-sudo apt install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev librsvg2-dev
+sudo apt install -y \
+  libwebkit2gtk-4.1-dev \
+  libsoup-3.0-dev \
+  librsvg2-dev \
+  libgtk-3-dev \
+  libayatana-appindicator3-dev \
+  libdbus-1-dev
 ```
 
-`libgtk-3-dev` 和 `libayatana-appindicator3-dev` 也要有（托盘图标需要）。`libdbus-1-dev` 是
-keyring 的 `dbus-secret-service` 后端要用的，通常随桌面环境已在。不需要 `libssl-dev`
-（HTTP 走 rustls + aws-lc-sys）也不需要 `libxdo-dev`（依赖树里没有 xdo-sys）。
+`libgtk-3-dev` 和 `libayatana-appindicator3-dev` 是托盘图标需要的，`libdbus-1-dev` 是 keyring 的
+`dbus-secret-service` 后端需要的——三者在桌面环境里通常已经装好，纯净的构建机上别漏。不需要
+`libssl-dev`（HTTP 走 rustls + aws-lc-sys）也不需要 `libxdo-dev`（依赖树里没有 xdo-sys）。
 
 然后直接打包，产出 deb + AppImage：
 

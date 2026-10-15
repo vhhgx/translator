@@ -1,0 +1,62 @@
+# 推送与 PR 的基本检查：类型检查 + Rust 测试。
+#
+# 这一层不产出任何发布物，作用是把「构建失败」拦在合入之前，而不是等到打 tag
+# 之后才发现代码编不过。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: 类型检查与测试
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      # 托盘要 libayatana-appindicator，凭据库走 dbus-secret-service，
+      # webview2gtk 是 Tauri 在 Linux 上的宿主——都得到齐，否则 cargo 编译阶段
+      # 会在 tauri/mio 那层报缺库错误。
+      - name: 安装系统依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libsoup-3.0-dev \
+            librsvg2-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            libdbus-1-dev
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: 前端类型检查
+        run: pnpm typecheck
+
+      - name: Rust 测试
+        working-directory: src-tauri
+        run: cargo test
