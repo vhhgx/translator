@@ -33,6 +33,7 @@ tauri-plugin-global-shortcut = "2"
 tauri-plugin-autostart = "2"
 rdev = "0.5.3"
 arboard = "3.6.1"
+scraper = "0.27.0"
 
 [target.'cfg(windows)'.dependencies]
 uiautomation = { version = "0.25.1", default-features = false, features = ["control", "input", "pattern"] }

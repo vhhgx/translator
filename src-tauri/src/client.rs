@@ -101,6 +101,15 @@ fn completion_budget(prompt: &str) -> u32 {
     remaining.clamp(256, CONTEXT_TOKENS / 2) as u32
 }
 
+/// 抓取网页用的客户端：超时给得宽一些（有些站点响应慢），并跟随跳转。
+pub fn web_client(timeout_secs: u64) -> AppResult<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(timeout_secs.clamp(5, 120)))
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .build()
+        .map_err(|e| AppError::Io(e.to_string()))
+}
+
 /// 探测后端是否可用，顺带把模型列表带回来给界面显示。
 ///
 /// 先打 OpenAI 标准的 `/v1/models`：它一举两得——能验 key（401 就说明 key

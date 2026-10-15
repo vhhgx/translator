@@ -6,14 +6,22 @@ import {
   FALLBACK_MODES,
   FALLBACK_STYLES
 } from '../constants'
-import type { Backend, GlossaryView, HistoryItem, Meta, Settings, TermPair, TranslateRequest } from '../types'
+import type {
+  Backend,
+  GlossaryView,
+  HistoryItem,
+  Meta,
+  Settings,
+  TermPair,
+  TranslateRequest
+} from '../types'
 
 export type { HistoryItem, TermPair }
 
 /** 全局共享的应用状态：后端配置、术语库、元数据、导航徽标计数 */
 
 /** 主窗口当前视图。放全局是为了让翻译页的「词库胶囊」等入口也能切换页签。 */
-export type Tab = 'translate' | 'glossary' | 'history' | 'batch' | 'doc' | 'settings'
+export type Tab = 'translate' | 'glossary' | 'history' | 'web' | 'batch' | 'doc' | 'settings'
 export const tab = ref<Tab>('translate')
 
 // 先用静态兜底填充，避免元数据到达前界面空白

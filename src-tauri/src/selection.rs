@@ -63,6 +63,19 @@ fn capture_selected_text() -> Option<String> {
     None
 }
 
+/// 旧方案留下的哨兵前缀。
+const SENTINEL_PREFIX: &str = "hymt2-sentinel-";
+
+/// 这段文本是不是旧方案残留的哨兵。
+///
+/// 必须是「以哨兵前缀开头」——不能是 `contains`，否则用户自己复制的一段
+/// 提到该字符串的文本会被误清。抽成函数是为了让测试打到生产代码本身，
+/// 而不是在测试里另抄一份判据（那样改了实现测试也不会红）。
+#[cfg(not(windows))]
+fn is_leftover_sentinel(text: &str) -> bool {
+    text.starts_with(SENTINEL_PREFIX)
+}
+
 /// 清掉上一次残留的哨兵。
 ///
 /// 哨兵是旧的 Ctrl+C 取词方案留下的：捕获那 ~250ms 里剪贴板被写入一段
@@ -73,7 +86,7 @@ fn capture_selected_text() -> Option<String> {
 pub fn repair_clipboard() {
     if let Ok(mut cb) = arboard::Clipboard::new() {
         if let Ok(text) = cb.get_text() {
-            if text.starts_with("hymt2-sentinel-") {
+            if is_leftover_sentinel(&text) {
                 let _ = cb.set_text(String::new());
             }
         }
@@ -442,12 +455,7 @@ fn show_popup(app: &AppHandle, text: &str) {
 // 保留的测试覆盖「残留哨兵识别」——它决定启动时会不会误清用户的剪贴板。
 #[cfg(all(test, not(windows)))]
 mod tests {
-    use super::*;
-
-    /// 与 `repair_clipboard` 里判据一致：只有以哨兵前缀开头的才清。
-    fn is_leftover_sentinel(text: &str) -> bool {
-        text.starts_with("hymt2-sentinel-")
-    }
+    use super::is_leftover_sentinel;
 
     #[test]
     fn 识别残留哨兵() {

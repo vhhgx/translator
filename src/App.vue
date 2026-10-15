@@ -7,6 +7,7 @@ import {
   FileText,
   Globe,
   Languages,
+  Layers,
   Minus,
   Moon,
   Settings,
@@ -24,6 +25,7 @@ import GlossaryView from './views/GlossaryView.vue'
 import HistoryView from './views/HistoryView.vue'
 import SettingsView from './views/SettingsView.vue'
 import TranslateView from './views/TranslateView.vue'
+import WebView from './views/WebView.vue'
 import type { HistoryItem, Tab } from './composables/useAppState'
 
 const { themeMode } = useTheme()
@@ -130,17 +132,29 @@ function reuse(item: HistoryItem) {
               <Languages :size="14" />
               <span>文本翻译</span>
             </button>
-            <button class="nav-tab" :class="{ 'nav-tab--active': tab === 'doc' }" @click="go('doc')">
+            <button
+              class="nav-tab"
+              :class="{ 'nav-tab--active': tab === 'doc' }"
+              @click="go('doc')"
+            >
               <FileText :size="14" />
               <span>文档翻译</span>
+            </button>
+            <button
+              class="nav-tab"
+              :class="{ 'nav-tab--active': tab === 'web' }"
+              @click="go('web')"
+            >
+              <Globe :size="14" />
+              <span>网页翻译</span>
             </button>
             <button
               class="nav-tab"
               :class="{ 'nav-tab--active': tab === 'batch' }"
               @click="go('batch')"
             >
-              <Globe :size="14" />
-              <span>网页 / 批量</span>
+              <Layers :size="14" />
+              <span>批量翻译</span>
             </button>
           </nav>
         </div>
@@ -209,6 +223,7 @@ function reuse(item: HistoryItem) {
         <GlossaryView v-else-if="tab === 'glossary'" />
         <HistoryView v-else-if="tab === 'history'" @reuse="reuse" />
         <BatchView v-else-if="tab === 'batch'" />
+        <WebView v-else-if="tab === 'web'" />
         <DocumentView v-else-if="tab === 'doc'" />
         <SettingsView v-else-if="tab === 'settings'" />
       </main>

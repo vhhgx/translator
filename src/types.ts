@@ -111,6 +111,8 @@ export interface DocProgress {
   total: number
   failed: number
   errors: [number, string][]
+  /** 因用户取消而提前结束；部分结果已保存到 out_path。 */
+  cancelled: boolean
 }
 
 export interface BatchProgress {
@@ -118,6 +120,33 @@ export interface BatchProgress {
   done: number
   failed: number
   output: string
+  cancelled: boolean
+}
+
+/** 文档/批量翻译的实时进度事件（`hymt2:job`）。 */
+export interface JobProgress {
+  job_id: string
+  done: number
+  total: number
+  failed: number
+  /** 任务收尾时的最后一条事件。 */
+  finished?: boolean
+  cancelled?: boolean
+}
+
+/** 网页抽取出的正文块。tag 用于前端排版（标题、段落、代码块等）。 */
+export interface WebBlock {
+  tag: string
+  text: string
+  /** 代码块等不翻译。 */
+  translatable: boolean
+}
+
+export interface WebPage {
+  url: string
+  title: string
+  blocks: WebBlock[]
+  bytes: number
 }
 
 export interface Meta {

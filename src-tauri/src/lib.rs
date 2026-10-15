@@ -16,11 +16,15 @@ pub mod selection;
 #[cfg(windows)]
 mod selection_win;
 pub mod tray;
+pub mod webpage;
 
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
 use client::{TranslateRequest, TranslateResponse};
@@ -38,6 +42,42 @@ pub struct AppState {
 /// History lives in a global because streaming jobs run detached from the
 /// command's `State`, which cannot be moved into a `'static` task.
 static HISTORY: Mutex<Option<History>> = Mutex::new(None);
+
+/// 可取消任务的登记表：job_id -> 取消标志。
+///
+/// 文档/批量翻译一跑就是几分钟，期间用户没有任何办法停下——窗口只能干等。
+/// 每个任务启动时在这里挂一个 `AtomicBool`，`cancel_job` 把它置位，工作线程
+/// 在每个条目开始前查一次。用 `HashMap` 而不是单个标志，是为了支持「取消这个
+/// 任务」而不是「取消所有任务」，将来并发跑两个任务也不会互相误杀。
+static JOBS: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
+
+fn jobs() -> &'static Mutex<HashMap<String, Arc<AtomicBool>>> {
+    JOBS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 登记一个可取消任务，返回它的取消标志。
+fn register_job(job_id: &str) -> Arc<AtomicBool> {
+    let flag = Arc::new(AtomicBool::new(false));
+    jobs().lock().unwrap().insert(job_id.to_string(), flag.clone());
+    flag
+}
+
+/// 任务结束时摘掉登记，避免 Map 无限增长。
+fn unregister_job(job_id: &str) {
+    jobs().lock().unwrap().remove(job_id);
+}
+
+/// 取消一个正在跑的任务。返回它是否真的还在跑。
+#[tauri::command]
+fn cancel_job(job_id: String) -> bool {
+    match jobs().lock().unwrap().get(&job_id) {
+        Some(flag) => {
+            flag.store(true, Ordering::Relaxed);
+            true
+        }
+        None => false,
+    }
+}
 
 type CmdResult<T> = Result<T, AppError>;
 
@@ -641,13 +681,170 @@ fn doc_save(path: String, content: String) -> CmdResult<()> {
     document::save(&path, &content)
 }
 
+/// 文档/批量共用的翻译上下文。
+///
+/// 两条路径的差别只有「术语串是否为空」，其余（后端、温度、超时、目标语言）
+/// 完全一致，所以并成一个结构传下去。
+#[derive(Clone)]
+struct PoolCtx {
+    backend: Backend,
+    key: Option<String>,
+    temperature: f32,
+    timeout: u64,
+    lang: String,
+    terminology: String,
+}
+
+/// 进度事件的最小间隔。每个条目都推一次会把 webview 淹掉。
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(120);
+
+/// 并发翻译一批文本，边跑边报进度，并响应取消。
+///
+/// 返回 `(成功项, 失败项, 是否被取消)`。抽成公共函数是因为文档与批量两条
+/// 路径的并发/进度/取消逻辑必须一致——早先各写一份，批量那条就漏了取消。
+///
+/// 进度事件 `hymt2:job` 的负载是 `{ job_id, done, total, failed }`；前端按
+/// `job_id` 过滤。事件按 `PROGRESS_INTERVAL` 节流，避免每条目推一次。
+async fn run_pool(
+    app: tauri::AppHandle,
+    job_id: String,
+    ctx: PoolCtx,
+    work: Arc<Vec<(usize, String)>>,
+    concurrency: usize,
+    cancel: Arc<AtomicBool>,
+) -> (Vec<(usize, String)>, Vec<(i32, String)>, bool) {
+    let total = work.len();
+    let next = Arc::new(tokio::sync::Mutex::new(0usize));
+    let done_ctr = Arc::new(AtomicUsize::new(0));
+    let fail_ctr = Arc::new(AtomicUsize::new(0));
+    let last_tick = Arc::new(Mutex::new(Instant::now() - PROGRESS_INTERVAL));
+
+    let mut tasks = Vec::new();
+    for _ in 0..concurrency {
+        let (work, next, done_ctr, fail_ctr, last_tick) = (
+            work.clone(),
+            next.clone(),
+            done_ctr.clone(),
+            fail_ctr.clone(),
+            last_tick.clone(),
+        );
+        let (backend, key, terminology, lang) = (
+            ctx.backend.clone(),
+            ctx.key.clone(),
+            ctx.terminology.clone(),
+            ctx.lang.clone(),
+        );
+        let (temperature, timeout) = (ctx.temperature, ctx.timeout);
+        let (app, jid, cancel) = (app.clone(), job_id.clone(), cancel.clone());
+        tasks.push(tokio::spawn(async move {
+            let mut out: Vec<(usize, Result<String, String>)> = Vec::new();
+            loop {
+                if cancel.load(Ordering::Relaxed) {
+                    break;
+                }
+                let i = {
+                    let mut n = next.lock().await;
+                    if *n >= work.len() {
+                        None
+                    } else {
+                        let v = *n;
+                        *n += 1;
+                        Some(v)
+                    }
+                };
+                let Some(i) = i else { break };
+
+                let (index, text) = &work[i];
+                let p = prompt::build_prompt(text, &lang, Mode::Basic, &terminology, "", "", "");
+                let req = TranslateRequest {
+                    text: p,
+                    target_lang: lang.clone(),
+                    mode: Mode::Basic,
+                    terms: vec![],
+                    auto_filter_terms: false,
+                    style: String::new(),
+                    format_type: String::new(),
+                    context: String::new(),
+                    ignore_glossary: true,
+                };
+                let r = match client::translate(&backend, key.as_deref(), temperature, timeout, &req)
+                    .await
+                {
+                    Ok(r) => Ok(r.text),
+                    Err(e) => Err(e.to_string()),
+                };
+                match &r {
+                    Ok(_) => done_ctr.fetch_add(1, Ordering::Relaxed),
+                    Err(_) => fail_ctr.fetch_add(1, Ordering::Relaxed),
+                };
+                out.push((*index, r));
+
+                // 节流上报，避免每个条目都推一次事件。
+                let due = {
+                    let mut last = last_tick.lock().unwrap();
+                    if last.elapsed() >= PROGRESS_INTERVAL {
+                        *last = Instant::now();
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if due {
+                    let _ = app.emit(
+                        "hymt2:job",
+                        serde_json::json!({
+                            "job_id": jid,
+                            "done": done_ctr.load(Ordering::Relaxed),
+                            "total": total,
+                            "failed": fail_ctr.load(Ordering::Relaxed),
+                        }),
+                    );
+                }
+            }
+            out
+        }));
+    }
+
+    let mut results: Vec<(usize, String)> = Vec::new();
+    let mut errors: Vec<(i32, String)> = Vec::new();
+    for t in tasks {
+        match t.await {
+            Ok(items) => {
+                for (index, r) in items {
+                    match r {
+                        Ok(text) => results.push((index, text)),
+                        Err(e) => errors.push((index as i32, e)),
+                    }
+                }
+            }
+            Err(e) => errors.push((-1, e.to_string())),
+        }
+    }
+
+    let cancelled = cancel.load(Ordering::Relaxed);
+    // 收尾事件：节流可能吃掉最后一次，这里补一条终态。
+    let _ = app.emit(
+        "hymt2:job",
+        serde_json::json!({
+            "job_id": job_id, "done": results.len(), "total": total,
+            "failed": errors.len(), "finished": true, "cancelled": cancelled,
+        }),
+    );
+    unregister_job(&job_id);
+
+    (results, errors, cancelled)
+}
+
 #[tauri::command]
 async fn doc_translate(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     path: String,
     target_lang: String,
     terms: Vec<[String; 2]>,
     concurrency: Option<usize>,
+    job_id: Option<String>,
+    out_path: Option<String>,
 ) -> CmdResult<DocProgress> {
     let doc = document::load(&path)?;
     let (backend, temperature, timeout) = {
@@ -668,9 +865,6 @@ async fn doc_translate(
     let terminology = prompt::terminology_string(&terms, reverse);
     let concurrency = concurrency.unwrap_or(3).clamp(1, 8);
 
-let mut results: Vec<(usize, String)> = Vec::new();
-    let mut errors: Vec<(i32, String)> = Vec::new();
-
     // Own the translatable texts so worker tasks don't borrow `doc`.
     let work: Arc<Vec<(usize, String)>> = Arc::new(
         doc.segments
@@ -679,79 +873,25 @@ let mut results: Vec<(usize, String)> = Vec::new();
             .map(|s| (s.index, s.text.clone()))
             .collect(),
     );
+
+    let jid = job_id.unwrap_or_else(|| format!("doc-{}", work.len()));
     let total = work.len();
-    let next = Arc::new(tokio::sync::Mutex::new(0usize));
-    let mut tasks = Vec::new();
+    let cancel = register_job(&jid);
+    let ctx = PoolCtx {
+        backend,
+        key,
+        temperature,
+        timeout,
+        lang,
+        terminology,
+    };
+    let (results, errors, cancelled) = run_pool(app, jid, ctx, work, concurrency, cancel).await;
 
-    for _ in 0..concurrency {
-        let work = work.clone();
-        let next = next.clone();
-        let backend = backend.clone();
-        let key = key.clone();
-        let terminology = terminology.clone();
-        let lang = lang.clone();
-        tasks.push(tokio::spawn(async move {
-            let mut out: Vec<(usize, Result<String, String>)> = Vec::new();
-            loop {
-                let i = {
-                    let mut n = next.lock().await;
-                    if *n >= work.len() {
-                        None
-                    } else {
-                        let v = *n;
-                        *n += 1;
-                        Some(v)
-                    }
-                };
-                let Some(i) = i else { break };
-
-                let (index, text) = &work[i];
-                let p = prompt::build_prompt(
-                    text,
-                    &lang,
-                    Mode::Basic,
-                    &terminology,
-                    "",
-                    "",
-                    "",
-                );
-                let req = TranslateRequest {
-                    text: p,
-                    target_lang: lang.clone(),
-                    mode: Mode::Basic,
-                    terms: vec![],
-                    auto_filter_terms: false,
-                    style: String::new(),
-                    format_type: String::new(),
-                    context: String::new(),
-                    ignore_glossary: true,
-                };
-                let r = match client::translate(&backend, key.as_deref(), temperature, timeout, &req).await
-                {
-                    Ok(r) => Ok(r.text),
-                    Err(e) => Err(e.to_string()),
-                };
-                out.push((*index, r));
-            }
-            out
-        }));
-    }
-
-    for t in tasks {
-        match t.await {
-            Ok(items) => {
-                for (index, r) in items {
-                    match r {
-                        Ok(text) => results.push((index, text)),
-                        Err(e) => errors.push((index as i32, e)),
-                    }
-                }
-            }
-            Err(e) => errors.push((-1, e.to_string())),
-        }
-    }
-
-    let out_path = document::output_path(&path, &target_lang);
+    // 取消时也落盘：已经译好的段落是用户的成果，没译的部分原样保留。
+    // 输出路径优先用前端传的（用户可能另存为过），否则按语言推导。
+    let out_path = out_path
+        .filter(|p| !p.trim().is_empty())
+        .unwrap_or_else(|| document::output_path(&path, &target_lang));
     let content = document::reassemble(&doc.segments, &results);
     document::save(&out_path, &content)?;
 
@@ -761,6 +901,7 @@ let mut results: Vec<(usize, String)> = Vec::new();
         total,
         failed: errors.len(),
         errors,
+        cancelled,
     })
 }
 
@@ -771,12 +912,102 @@ pub struct DocProgress {
     pub total: usize,
     pub failed: usize,
     pub errors: Vec<(i32, String)>,
+    /// 是否因用户取消而提前结束。前端据此提示「已停止，部分结果已保存」。
+    pub cancelled: bool,
+}
+
+// ---------- web page ----------
+
+/// 抓取网页并抽出正文，不翻译。让用户先看一眼抽到了什么再决定翻不翻——
+/// 直接翻的话，抽错了（比如抽到导航栏）用户还得等一遍才知道。
+#[tauri::command]
+async fn web_fetch(
+    state: State<'_, AppState>,
+    url: String,
+) -> CmdResult<webpage::WebPage> {
+    let timeout = state.settings.lock().unwrap().timeout_secs;
+    let client = client::web_client(timeout)?;
+    webpage::fetch(&client, &url).await
+}
+
+/// 翻译已抓取的网页正文块，并发 + 进度 + 可取消。
+///
+/// `blocks` 由前端把 `web_fetch` 的结果原样回传：翻译是纯函数式的，正文已经
+/// 抽好，后端不需要再抓一次（也不该——两次抓取可能拿到不同内容）。
+#[tauri::command]
+async fn web_translate(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    target_lang: String,
+    blocks: Vec<webpage::WebBlock>,
+    concurrency: Option<usize>,
+    job_id: Option<String>,
+) -> CmdResult<Vec<String>> {
+    let (backend, temperature, timeout) = {
+        let s = state.settings.lock().unwrap();
+        let b = s
+            .active()
+            .cloned()
+            .ok_or_else(|| AppError::Io("尚未配置任何后端".into()))?;
+        (b, s.temperature, s.timeout_secs)
+    };
+    let key = config::load_secret(&backend.id);
+    let lang = prompt::resolve_language(&target_lang)?;
+    let concurrency = concurrency.unwrap_or(3).clamp(1, 8);
+
+    // 只翻可翻译的块；代码块原样回填，前端按下标对齐。
+    let work: Arc<Vec<(usize, String)>> = Arc::new(
+        blocks
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.translatable)
+            .map(|(i, b)| (i, b.text.clone()))
+            .collect(),
+    );
+
+    let jid = job_id.unwrap_or_else(|| format!("web-{}", work.len()));
+    let cancel = register_job(&jid);
+    let ctx = PoolCtx {
+        backend,
+        key,
+        temperature,
+        timeout,
+        lang,
+        terminology: String::new(),
+    };
+    let (results, errors, _cancelled) = run_pool(app, jid, ctx, work, concurrency, cancel).await;
+
+    if results.is_empty() && !errors.is_empty() {
+        return Err(AppError::Io(format!("全部失败: {}", errors[0].1)));
+    }
+
+    // 按原下标回填，代码块等保持原文。
+    let mut out: Vec<String> = blocks.iter().map(|b| b.text.clone()).collect();
+    for (i, text) in results {
+        if i < out.len() {
+            out[i] = text;
+        }
+    }
+    Ok(out)
 }
 
 // ---------- JSONL batch ----------
 
+/// 一条记录的「身份」：去掉 `translation` 之后的 JSON。
+///
+/// 断点续跑靠它判断某条是否已经译过。不能只看 `text` 字段——同一句话可能出现
+/// 多次而对应不同的额外字段。比较整条记录（排除译文）才能一一对应。
+fn record_key(v: &serde_json::Value) -> String {
+    let mut c = v.clone();
+    if let Some(o) = c.as_object_mut() {
+        o.remove("translation");
+    }
+    c.to_string()
+}
+
 #[tauri::command]
 async fn batch_translate(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     input: String,
     output: String,
@@ -784,39 +1015,51 @@ async fn batch_translate(
     text_field: Option<String>,
     concurrency: Option<usize>,
     resume: bool,
+    job_id: Option<String>,
 ) -> CmdResult<BatchProgress> {
     let raw = std::fs::read_to_string(&input).map_err(|e| AppError::Io(format!("读取失败: {e}")))?;
     let lang = prompt::resolve_language(&target_lang)?;
     let field = text_field.unwrap_or_else(|| "text".to_string());
 
-    // Resume: keep records already present in the output file.
-    let mut done: Vec<serde_json::Value> = Vec::new();
+    // 解析输入：保留每行原始记录与原行序，输出时按同一顺序写回。
+    let records: Vec<serde_json::Value> = raw
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l.trim()).ok())
+        .collect();
+    if records.is_empty() {
+        return Err(AppError::Io("输入文件里没有可解析的 JSON 行".into()));
+    }
+
+    // 续跑：读回已存在的输出，按身份建索引。
+    // 早先只把旧记录原样追加、却仍把全部条目重译一遍，结果输出里同一行出现两次。
+    let mut done_map: HashMap<String, serde_json::Value> = HashMap::new();
     if resume && std::path::Path::new(&output).exists() {
         if let Ok(t) = std::fs::read_to_string(&output) {
             for line in t.lines() {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
-                    done.push(v);
+                    // 只认真正带译文的记录，没有 translation 的下次仍然要译。
+                    if v.get("translation").and_then(|x| x.as_str()).is_some() {
+                        done_map.insert(record_key(&v), v);
+                    }
                 }
             }
         }
     }
 
     let mut items: Vec<(usize, String)> = Vec::new();
-    for (i, line) in raw.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() {
+    for (i, v) in records.iter().enumerate() {
+        if done_map.contains_key(&record_key(v)) {
             continue;
         }
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
         if let Some(text) = v.get(&field).and_then(|x| x.as_str()) {
             if !text.trim().is_empty() {
                 items.push((i, text.to_string()));
             }
         }
     }
-    let total = items.len();
+    let todo = items.len();
+    let total = records.len();
 
     let (backend, temperature, timeout) = {
         let s = state.settings.lock().unwrap();
@@ -828,93 +1071,51 @@ async fn batch_translate(
     };
     let key = config::load_secret(&backend.id);
     let concurrency = concurrency.unwrap_or(3).clamp(1, 16);
+
+    let jid = job_id.unwrap_or_else(|| format!("batch-{todo}"));
+    let cancel = register_job(&jid);
+    let ctx = PoolCtx {
+        backend,
+        key,
+        temperature,
+        timeout,
+        lang,
+        terminology: String::new(),
+    };
     let work = Arc::new(items);
-    let next = Arc::new(tokio::sync::Mutex::new(0usize));
-    let mut tasks = Vec::new();
-    let mut failed = 0usize;
+    let (translated, errors, cancelled) =
+        run_pool(app, jid, ctx, work, concurrency, cancel).await;
 
-    for _ in 0..concurrency {
-        let work = work.clone();
-        let next = next.clone();
-        let backend = backend.clone();
-        let key = key.clone();
-        let lang = lang.clone();
-        tasks.push(tokio::spawn(async move {
-            let mut out: Vec<(usize, Result<String, String>)> = Vec::new();
-            loop {
-                let i = {
-                    let mut n = next.lock().await;
-                    if *n >= work.len() {
-                        None
-                    } else {
-                        let v = *n;
-                        *n += 1;
-                        Some(v)
-                    }
-                };
-                let Some(i) = i else { break };
-
-                let (idx, text) = &work[i];
-                let p = prompt::build_prompt(text, &lang, Mode::Basic, "", "", "", "");
-                let req = TranslateRequest {
-                    text: p,
-                    target_lang: lang.clone(),
-                    mode: Mode::Basic,
-                    terms: vec![],
-                    auto_filter_terms: false,
-                    style: String::new(),
-                    format_type: String::new(),
-                    context: String::new(),
-                    ignore_glossary: true,
-                };
-                let r = match client::translate(&backend, key.as_deref(), temperature, timeout, &req).await
-                {
-                    Ok(r) => Ok(r.text),
-                    Err(e) => Err(e.to_string()),
-                };
-                out.push((*idx, r));
-            }
-            out
-        }));
-    }
-
-    let mut translated: Vec<(usize, String)> = Vec::new();
-    for t in tasks {
-        match t.await {
-            Ok(items) => {
-                for (idx, r) in items {
-                    match r {
-                        Ok(text) => translated.push((idx, text)),
-                        Err(_) => failed += 1,
-                    }
-                }
-            }
-            Err(_) => failed += concurrency,
-        }
-    }
-
+    // 按输入原顺序写出：译好的放译文，上次已译的用旧记录，其余原样保留
+    // （下次续跑会自动重试这些没有 translation 的行）。
     let mut out = String::new();
-    for v in done {
+    let mut written_translations = 0usize;
+    for (i, rec) in records.iter().enumerate() {
+        let v = match translated.iter().find(|(idx, _)| *idx == i) {
+            Some((_, text)) => {
+                let mut c = rec.clone();
+                c["translation"] = serde_json::Value::String(text.clone());
+                c
+            }
+            None => match done_map.get(&record_key(rec)) {
+                Some(done) => done.clone(),
+                None => rec.clone(),
+            },
+        };
+        if v.get("translation").and_then(|x| x.as_str()).is_some() {
+            written_translations += 1;
+        }
         out.push_str(&v.to_string());
         out.push('\n');
-    }
-    // Re-read the original records so untouched fields survive.
-    for (line_no, text) in translated.iter() {
-        if let Some(orig) = raw.lines().nth(*line_no) {
-            if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(orig.trim()) {
-                v["translation"] = serde_json::Value::String(text.clone());
-                out.push_str(&v.to_string());
-                out.push('\n');
-            }
-        }
     }
     std::fs::write(&output, out).map_err(|e| AppError::Io(format!("写入失败: {e}")))?;
 
     Ok(BatchProgress {
         total,
-        done: translated.len(),
-        failed,
+        done: written_translations,
+        failed: errors.len(),
         output,
+        cancelled,
     })
 }
 
@@ -924,6 +1125,8 @@ pub struct BatchProgress {
     pub done: usize,
     pub failed: usize,
     pub output: String,
+    /// 见 `DocProgress::cancelled`。
+    pub cancelled: bool,
 }
 
 #[tauri::command]
@@ -1065,6 +1268,9 @@ pub fn run() {
             doc_save,
             doc_translate,
             batch_translate,
+            web_fetch,
+            web_translate,
+            cancel_job,
             read_text_file,
             log_list,
             log_status,
@@ -1073,4 +1279,34 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::record_key;
+    use serde_json::Value;
+
+    /// 续跑的核心判据：身份要忽略 `translation`，否则同一条记录重跑后
+    /// 「已译」和「待译」两份的身份对不上，就会重复输出——这正是修的 bug。
+    #[test]
+    fn record_key_ignores_translation() {
+        let input: Value = serde_json::from_str(r#"{"id":1,"text":"你好"}"#).unwrap();
+        let done: Value = serde_json::from_str(r#"{"id":1,"text":"你好","translation":"Hello"}"#).unwrap();
+        assert_eq!(record_key(&input), record_key(&done));
+    }
+
+    #[test]
+    fn record_key_distinguishes_different_records() {
+        let a: Value = serde_json::from_str(r#"{"id":1,"text":"你好"}"#).unwrap();
+        let b: Value = serde_json::from_str(r#"{"id":2,"text":"你好"}"#).unwrap();
+        // 同一句话出现两次但 id 不同，必须视为两条，不能靠 text 判重。
+        assert_ne!(record_key(&a), record_key(&b));
+    }
+
+    #[test]
+    fn record_key_stable_across_equal_values() {
+        let a: Value = serde_json::from_str(r#"{"id":1,"text":"x"}"#).unwrap();
+        let b: Value = serde_json::from_str(r#"{"id":1,"text":"x"}"#).unwrap();
+        assert_eq!(record_key(&a), record_key(&b));
+    }
 }

@@ -15,7 +15,9 @@ import type {
   Meta,
   Settings,
   TranslateRequest,
-  TranslateResponse
+  TranslateResponse,
+  WebBlock,
+  WebPage
 } from './types'
 
 // ---------- toast ----------
@@ -112,8 +114,18 @@ export const api = {
     path: string,
     targetLang: string,
     terms: [string, string][],
-    concurrency?: number
-  ) => invoke<DocProgress>('doc_translate', { path, targetLang, terms, concurrency: concurrency ?? null }),
+    concurrency?: number,
+    jobId?: string,
+    outPath?: string
+  ) =>
+    invoke<DocProgress>('doc_translate', {
+      path,
+      targetLang,
+      terms,
+      concurrency: concurrency ?? null,
+      jobId: jobId ?? null,
+      outPath: outPath ?? null
+    }),
 
   batchTranslate: (
     input: string,
@@ -121,7 +133,8 @@ export const api = {
     targetLang: string,
     textField: string,
     concurrency: number,
-    resume: boolean
+    resume: boolean,
+    jobId?: string
   ) =>
     invoke<BatchProgress>('batch_translate', {
       input,
@@ -129,7 +142,23 @@ export const api = {
       targetLang,
       textField,
       concurrency,
-      resume
+      resume,
+      jobId: jobId ?? null
+    }),
+
+  /** 取消正在跑的文档/批量任务。返回它是否还在跑。 */
+  cancelJob: (jobId: string) => invoke<boolean>('cancel_job', { jobId }),
+
+  /** 抓取网页并抽出正文（不翻译）。 */
+  webFetch: (url: string) => invoke<WebPage>('web_fetch', { url }),
+
+  /** 翻译已抓取的正文块，按原下标返回译文。 */
+  webTranslate: (targetLang: string, blocks: WebBlock[], concurrency?: number, jobId?: string) =>
+    invoke<string[]>('web_translate', {
+      targetLang,
+      blocks,
+      concurrency: concurrency ?? null,
+      jobId: jobId ?? null
     }),
 
   readTextFile: (path: string) => invoke<string>('read_text_file', { path }),
