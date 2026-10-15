@@ -290,8 +290,8 @@ keyring 的 `dbus-secret-service` 后端要用的，通常随桌面环境已在�
 
 ```bash
 pnpm app:build
-# src-tauri/target/release/bundle/deb/zephyr-translator_0.1.0_amd64.deb
-# src-tauri/target/release/bundle/appimage/zephyr-translator_0.1.0_amd64.AppImage
+# src-tauri/target/release/bundle/deb/zephyr-translator_1.0.0_amd64.deb
+# src-tauri/target/release/bundle/appimage/zephyr-translator_1.0.0_amd64.AppImage
 ```
 
 Linux 的三个特殊处理，都在配置里、不是代码改动：

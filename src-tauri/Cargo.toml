@@ -1,6 +1,6 @@
 [package]
 name = "zephyr-translator"
-version = "0.1.0"
+version = "1.0.0"
 description = "跨端桌面 AI 翻译工具"
 edition = "2021"
 rust-version = "1.77"

@@ -1,6 +1,6 @@
 {
   "name": "zephyr-translator",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "description": "跨端桌面 AI 翻译工具，可接入任意 OpenAI 兼容端点 (Vue 3 + Rust / Tauri)",
   "type": "module",

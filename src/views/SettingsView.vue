@@ -275,7 +275,7 @@ async function removeBackend(b: Backend) {
   toast('已删除')
 }
 
-const APP_VERSION = '0.1.0'
+const APP_VERSION = '1.0.0'
 
 // ---------- 请求日志 ----------
 const logs = ref<LogEntry[]>([])
