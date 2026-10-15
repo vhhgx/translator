@@ -245,8 +245,10 @@ onUnmounted(clearListeners)
 </script>
 
 <template>
-  <!-- 外层留 8px 给投影——透明窗口里圆角外侧要能看见阴影 -->
-  <div class="pop">
+  <!-- 外层留 8px 给投影——透明窗口里圆角外侧要能看见阴影。用 padding 而非
+       margin：margin 会与父容器折叠，留白就白留了（见样式里的说明）。 -->
+  <div class="pop-wrap">
+    <div class="pop">
     <!-- 顶部：徽标 + 语言流向 + 钉住/送主窗/关闭（可拖拽区域） -->
     <header class="pop__header" @mousedown="startDrag">
       <div class="pop__header-left">
@@ -322,21 +324,44 @@ onUnmounted(clearListeners)
     <div v-for="t in toasts" :key="t.id" class="toast" :class="`toast--${t.kind}`">
       {{ t.text }}
     </div>
+    </div>
   </div>
 </template>
 
 <style scoped>
+/* 留白容器：padding 不与父级折叠，margin 会 */
+.pop-wrap {
+  height: 100%;
+  padding: 8px;
+  box-sizing: border-box;
+}
+
+/* 外层用 padding 而不是给卡片 margin。
+ *
+ margin 会和父容器**折叠**：`.pop` 的 margin:8px 顶部直接被 #app 吃掉，
+ * 实测卡片 top=0、上边完全没有留白，而下边多出 16px —— 投影在顶部被窗口
+ * 边界齐刷刷切断，就成了你看到的那圈错位硬边。padding 不参与折叠，
+ * 留白是实打实的。 */
 .pop {
   display: flex;
   flex-direction: column;
-  height: calc(100% - 16px);
-  margin: 8px;
+  height: 100%;
   background: var(--surface-primary);
   border: 1px solid var(--border-subtle);
   border-radius: 13px;
-  /* 纯投影不带描边环：透明窗口里描边环会被误读成「坏掉的阴影」 */
-  box-shadow: 0 18px 42px -10px rgba(0, 0, 0, 0.35), 0 4px 12px rgba(0, 0, 0, 0.18);
+  /* 向下最远约 5px，刚好塞进外层 8px 留白里，不会被裁。
+     悬浮小卡片也不该用很重的投影——它压在别人的窗口上，阴影太浓反而脏。 */
+  box-shadow:
+    0 1px 2px rgba(15, 23, 42, 0.08),
+    0 3px 8px -2px rgba(15, 23, 42, 0.16);
   overflow: hidden;
+}
+
+/* 深色下纯黑投影几乎看不见，用一圈稍重的黑托出层次。 */
+:global(html[data-theme='dark']) .pop {
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.5),
+    0 3px 8px -2px rgba(0, 0, 0, 0.6);
 }
 
 /* ---------- 顶部 ---------- */

@@ -36,6 +36,9 @@ use tauri::{AppHandle, Emitter, Manager, PhysicalPosition};
 const POPUP_LABEL: &str = "popup";
 /// 两次触发的最小间隔。一次拖选可能抖出多个事件，去抖避免重复弹窗。
 const DEBOUNCE: Duration = Duration::from_millis(400);
+/// 划出完全相同的文字时，多久之内算「旧选区未变」而不是「用户想再翻一次」。
+/// 点滚动条/工具栏造成的误触发都在瞬间，隔久了的重复选择则是有意为之。
+const SAME_TEXT_WINDOW: Duration = Duration::from_secs(2);
 /// 弹窗相对光标的偏移。
 const OFFSET: (i32, i32) = (14, 20);
 /// 贴屏幕边缘时保留的空隙。
@@ -110,8 +113,8 @@ static CURSOR_X: AtomicI32 = AtomicI32::new(0);
 static CURSOR_Y: AtomicI32 = AtomicI32::new(0);
 
 static LAST_FIRE: Mutex<Option<Instant>> = Mutex::new(None);
-/// 上一次推给弹窗的原文。用来识别「选区还在、又点了一下」的重复触发。
-static LAST_SHOWN: Mutex<Option<String>> = Mutex::new(None);
+/// 上一次推给弹窗的原文及时间。用来识别「选区还在、又点了一下」的重复触发。
+static LAST_SHOWN: Mutex<Option<(String, Instant)>> = Mutex::new(None);
 /// 弹窗是否被用户钉住。钉住期间点击别处不收起，新划词也不打扰当前内容。
 static PINNED: AtomicBool = AtomicBool::new(false);
 /// `rdev::listen` 起不来时的原因（Wayland、无 X11 等），留给设置页展示。
@@ -225,16 +228,22 @@ fn modifier_ok() -> bool {
     }
 }
 
+/// 只判断，不记账。
+///
+/// 记账必须等到真弹了窗才做（见 mark_fired）。原先在这里顺手把时间戳写下去，
+/// 于是「在文本区点一下放光标」这种什么都没选中的操作也烧掉了去抖窗口，
+/// 紧接着的拖选被误判成「太频繁」而静默丢弃——表现出来就是划词时灵时不灵。
 fn debounce_ok() -> bool {
-    let mut guard = LAST_FIRE.lock().unwrap();
-    let now = Instant::now();
-    if let Some(prev) = *guard {
-        if now.duration_since(prev) < DEBOUNCE {
-            return false;
-        }
+    let guard = LAST_FIRE.lock().unwrap();
+    match *guard {
+        Some(prev) => Instant::now().duration_since(prev) >= DEBOUNCE,
+        None => true,
     }
-    *guard = Some(now);
-    true
+}
+
+/// 记账：只在真的要弹窗时调用。
+fn mark_fired() {
+    *LAST_FIRE.lock().unwrap() = Some(Instant::now());
 }
 
 fn cursor() -> (i32, i32) {
@@ -320,15 +329,19 @@ fn on_event(app: &AppHandle, event: EventType) {
             }
             let enabled = ENABLED.load(Ordering::Relaxed);
             let mod_ok = modifier_ok();
-            let debounce = debounce_ok();
-            if !enabled || !mod_ok || !debounce {
-                trace!(
-                    "拦：enabled={enabled} modifier_ok={mod_ok} debounce_ok={debounce}"
-                );
+            if !enabled || !mod_ok {
+                trace!("拦：enabled={enabled} modifier_ok={mod_ok}");
+                return;
+            }
+            // 去抖放在最后判：便宜的无状态判定先过，不合格的压根不该惊动
+            // 去抖窗口。原来三个条件一起求值，开关没开时也会白烧一次窗口。
+            if !debounce_ok() {
+                trace!("拦：距上次弹窗不足 {DEBOUNCE:?}");
                 return;
             }
             trace!("左键抬起 → 开始抓取");
-            // 抓取要模拟按键 + sleep，约 150ms，不能占着监听线程。
+            // 取词要走 UIA，可能要重试（见 selection_win），耗时上百毫秒，
+            // 不能占着监听线程。
             let app = app.clone();
             std::thread::spawn(move || capture_and_show(&app));
         }
@@ -346,7 +359,7 @@ fn capture_and_show(app: &AppHandle) {
         }
     }
     let Some(raw) = capture_selected_text() else {
-        trace!("抓取失败：没取到文本（无选区，或 PRIMARY 读不到）");
+        trace!("抓取失败：本次没取到任何文本（更细的原因见 [sel:uia] 那几行）");
         // 没选区 = 用户把选区清掉了。这之后重新选中同样的文字，是一次
         // 真正的重新划词，该弹还得弹。
         LAST_SHOWN.lock().unwrap().take();
@@ -358,27 +371,38 @@ fn capture_and_show(app: &AppHandle) {
         return;
     }
 
-    // 选中的还是同一段文字 → 不是新划词，是**旧选区还在**。
+    // 选中的还是同一段文字 → 多半不是新划词，是**旧选区还在**。
     //
     // 选完文字后点滚动条、工具栏、窗口里的非文本区域，都不会清掉选区，
     // UIA 焦点也仍停在那个文本控件上。此时若照常弹窗，用户看到的是
     // 「点哪儿窗口就跟到哪儿，还把刚才那段又翻了一遍」——因为
     // show_popup 会把窗口挪到光标处。
     //
-    // 注意判据不能写成「弹窗可见且文字相同」：点空白处时 ButtonPress 已经
-    // 先把弹窗藏了，那样这个条件永远不成立，等于没判（这正是上一版的 bug）。
+    // 判据不能写成「弹窗可见且文字相同」：点空白处时 ButtonPress 已经先把
+    // 弹窗藏了，那样这个条件永远不成立，等于没判（这正是上一版的 bug）。
     // 真正要问的是「用户有没有重新划词」，所以只看文字本身，不看弹窗状态。
-    if last_shown().as_deref() == Some(text) {
-        trace!("拦：与上次弹窗的文本完全相同（{} 字）→ 视为旧选区未变", text.chars().count());
-        return;
+    //
+    // 但**光比文字太严了**：连续两次划同样内容（双击同一个词两次、Esc 关掉
+    // 弹窗后重新划这个词）会被当成旧选区静默吞掉，而 LAST_SHOWN 只有在抓到
+    // 失败时才清。加一个短时间窗来区分：紧跟着点一下造成的误触发（滚动条、
+    // 工具栏）都发生在瞬间，间隔久了的重复选择则是用户真的想再翻一次。
+    if let Some((prev, when)) = last_shown() {
+        if prev == text && Instant::now().duration_since(when) < SAME_TEXT_WINDOW {
+            trace!(
+                "拦：与上次弹窗的文本完全相同且间隔不足 {SAME_TEXT_WINDOW:?}（{} 字）→ 视为旧选区未变",
+                text.chars().count()
+            );
+            return;
+        }
     }
 
-    *LAST_SHOWN.lock().unwrap() = Some(text.to_string());
+    *LAST_SHOWN.lock().unwrap() = Some((text.to_string(), Instant::now()));
+    mark_fired();
     show_popup(app, text);
 }
 
-/// 上一次弹窗展示的原文（已 trim）。
-fn last_shown() -> Option<String> {
+/// 上一次弹窗展示的原文（已 trim）及其时间。
+fn last_shown() -> Option<(String, Instant)> {
     LAST_SHOWN.lock().unwrap().clone()
 }
 
