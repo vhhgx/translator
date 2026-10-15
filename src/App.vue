@@ -6,9 +6,7 @@ import {
   BookOpen,
   Clock3,
   FileText,
-  Globe,
   Languages,
-  Layers,
   Minus,
   Moon,
   Settings,
@@ -20,13 +18,11 @@ import { toasts } from './api'
 import { glossary, historyCount, reloadAll, settings, tab } from './composables/useAppState'
 import { setThemeMode, listenThemeFromTray, useTheme } from './composables/useTheme'
 import BackendPicker from './components/BackendPicker.vue'
-import BatchView from './views/BatchView.vue'
 import DocumentView from './views/DocumentView.vue'
 import GlossaryView from './views/GlossaryView.vue'
 import HistoryView from './views/HistoryView.vue'
 import SettingsView from './views/SettingsView.vue'
 import TranslateView from './views/TranslateView.vue'
-import WebView from './views/WebView.vue'
 import type { HistoryItem, Tab } from './composables/useAppState'
 
 const { themeMode } = useTheme()
@@ -135,7 +131,9 @@ function reuse(item: HistoryItem) {
       <header class="titlebar" @mousedown="startDrag" @dblclick="onTitleDblClick">
         <div class="titlebar__left">
           <div class="app-brand" title="Zephyr Translator">
-            <div class="brand-logo">译</div>
+            <div class="brand-logo">
+              <img src="@/assets/brand-48.png" srcset="@/assets/brand-24.png 1x, @/assets/brand-48.png 2x" alt="" />
+            </div>
           </div>
 
           <!-- 左侧：工作台导航（分段控件） -->
@@ -156,22 +154,8 @@ function reuse(item: HistoryItem) {
               <FileText :size="14" />
               <span>文档翻译</span>
             </button>
-            <button
-              class="nav-tab"
-              :class="{ 'nav-tab--active': tab === 'web' }"
-              @click="go('web')"
-            >
-              <Globe :size="14" />
-              <span>网页翻译</span>
-            </button>
-            <button
-              class="nav-tab"
-              :class="{ 'nav-tab--active': tab === 'batch' }"
-              @click="go('batch')"
-            >
-              <Layers :size="14" />
-              <span>批量翻译</span>
-            </button>
+            <!-- 网页翻译与批量翻译暂时收起：功能可用但入口先不暴露，
+                 需要时把这两个按钮和下方对应的 v-else-if 分支放回来即可。 -->
           </nav>
         </div>
 
@@ -238,8 +222,6 @@ function reuse(item: HistoryItem) {
         <TranslateView v-if="tab === 'translate'" />
         <GlossaryView v-else-if="tab === 'glossary'" />
         <HistoryView v-else-if="tab === 'history'" @reuse="reuse" />
-        <BatchView v-else-if="tab === 'batch'" />
-        <WebView v-else-if="tab === 'web'" />
         <DocumentView v-else-if="tab === 'doc'" />
         <SettingsView v-else-if="tab === 'settings'" />
       </main>
@@ -314,20 +296,24 @@ function reuse(item: HistoryItem) {
   display: flex;
   align-items: center;
   padding-right: 4px;
+  /* 阴影挂在这一层而不是图上：.brand-logo 开了 overflow:hidden 裁圆角，
+     放里面的滤镜会被裁掉，等于白写。 */
+  filter: drop-shadow(0 2px 5px rgba(56, 189, 248, 0.45));
 }
 
 .brand-logo {
   width: 24px;
   height: 24px;
   border-radius: 6px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 12px;
-  font-weight: 700;
-  color: #fff;
-  background: linear-gradient(135deg, #38bdf8, #6366f1);
-  box-shadow: 0 2px 8px rgba(56, 189, 248, 0.3);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.brand-logo img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
 }
 
 .nav-tabs {
